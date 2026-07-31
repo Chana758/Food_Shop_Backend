@@ -4,29 +4,29 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\SoftDeletes; // ១. ត្រូវ import ចូល
+use Illuminate\Database\Eloquent\SoftDeletes; 
 
 class Product extends Model
 {
-    use HasFactory, SoftDeletes; // ២. ត្រូវ add trait SoftDeletes ចូល
+    use HasFactory, SoftDeletes; // Add SoftDeletes trait
 
-    // ៣. បន្ថែម Column ថ្មីៗចូលទៅក្នុង $fillable
+    // Add new columns to $fillable
     protected $fillable = [
         'name',
         'slug',
         'price',
-        'discount_price', // បន្ថែមថ្មី
+        'discount_price',
         'description',
         'image',
         'stock_quantity',
-        'prep_time',      // បន្ថែមថ្មី
-        'sku',            // បន្ថែមថ្មី
-        'is_active',      // បន្ថែមថ្មី
-        'is_featured',    // បន្ថែមថ្មី
+        'prep_time',     
+        'sku',           
+        'is_active',     
+        'is_featured',  
         'category_id'
     ];
 
-    // Relationship: មួយ Product ជារបស់មួយ Category
+    // Relationship: A product belongs to a category
     public function category()
     {
         return $this->belongsTo(Category::class);

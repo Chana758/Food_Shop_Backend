@@ -9,14 +9,20 @@ use Illuminate\Support\Facades\Storage;
 class CategoryController extends Controller
 {
     /**
-     * Display a listing of the resource.
+     * Display a listing with Search + Pagination from Backend
      */
-    // ទាញយក Categories ដោយប្រើ Pagination (១៥ ក្នុងមួយទំព័រ)
-    public function index()
+    public function index(Request $request)
     {
         try {
-            $categories = Category::paginate(15);
-            
+            $perPage = $request->query('per_page', 15);
+            $search  = $request->query('search', '');
+
+            $categories = Category::when($search, function ($query) use ($search) {
+                    $query->where('name', 'LIKE', "%{$search}%")
+                          ->orWhere('description', 'LIKE', "%{$search}%");
+                })
+                ->paginate($perPage);
+
             return response()->json([
                 'status' => 'success',
                 'data'   => $categories
@@ -37,24 +43,24 @@ class CategoryController extends Controller
     {
         try {
             $validatedData = $request->validate([
-                'name' => 'required|string|max:255',
-                'slug' => 'required|string|max:255|unique:categories',
-                'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048', 
+                'name'        => 'required|string|max:255',
+                'slug'        => 'required|string|max:255|unique:categories',
+                'image'       => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
                 'description' => 'nullable|string',
             ]);
-            
-            if($request->hasFile('image')) {
-                $file = $request->file('image');
+
+            if ($request->hasFile('image')) {
+                $file     = $request->file('image');
                 $filename = time() . '_' . $file->getClientOriginalName();
-                $file->storeAs("categories", $filename, 'public');
-                $validatedData['image'] = "categories/" . $filename; 
-            } 
-            
+                $file->storeAs('categories', $filename, 'public');
+                $validatedData['image'] = 'categories/' . $filename;
+            }
+
             $category = Category::create($validatedData);
 
             return response()->json([
                 'status' => 'success',
-                'data' => $category
+                'data'   => $category
             ], 201);
 
         } catch (\Throwable $th) {
@@ -71,16 +77,17 @@ class CategoryController extends Controller
     public function show($id)
     {
         $category = Category::find($id);
+
         if (!$category) {
             return response()->json([
-                'status' => 'error',
+                'status'  => 'error',
                 'message' => 'Category not found'
             ], 404);
         }
 
         return response()->json([
             'status' => 'success',
-            'data' => $category
+            'data'   => $category
         ], 200);
     }
 
@@ -91,28 +98,28 @@ class CategoryController extends Controller
     {
         try {
             $validatedData = $request->validate([
-                'name' => 'sometimes|required|string|max:255',
-                'slug' => 'sometimes|required|string|max:255|unique:categories,slug,' . $category->id,
-                'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+                'name'        => 'sometimes|required|string|max:255',
+                'slug'        => 'sometimes|required|string|max:255|unique:categories,slug,' . $category->id,
+                'image'       => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
                 'description' => 'nullable|string',
             ]);
-            
-            if($request->hasFile('image')) {
+
+            if ($request->hasFile('image')) {
                 if ($category->image) {
                     Storage::disk('public')->delete($category->image);
                 }
-                $file = $request->file('image');
+                $file     = $request->file('image');
                 $filename = time() . '_' . $file->getClientOriginalName();
-                $file->storeAs("categories", $filename, 'public');
-                $validatedData['image'] = "categories/" . $filename;
-            } 
-            
+                $file->storeAs('categories', $filename, 'public');
+                $validatedData['image'] = 'categories/' . $filename;
+            }
+
             $category->update($validatedData);
 
             return response()->json([
-                'status' => 'success',
+                'status'  => 'success',
                 'message' => 'Category updated successfully',
-                'data' => $category
+                'data'    => $category
             ], 200);
 
         } catch (\Throwable $th) {
@@ -124,16 +131,15 @@ class CategoryController extends Controller
     }
 
     /**
-     * Remove the specified resource from storage (Soft Delete).
+     * Soft Delete
      */
     public function destroy(Category $category)
     {
         try {
-            // ដោយសារប្រើ SoftDelete ផលិតផលមិនបាត់ពី DB ទេ គ្រាន់តែមាន deleted_at
             $category->delete();
 
             return response()->json([
-                'status' => 'success',
+                'status'  => 'success',
                 'message' => 'Category moved to trash'
             ], 200);
 
@@ -152,71 +158,79 @@ class CategoryController extends Controller
     {
         try {
             $category = Category::withTrashed()->find($id);
-            
-            if ($category && $category->trashed()) {
-                $category->restore();
+
+            if (!$category || !$category->trashed()) {
                 return response()->json([
-                    'status' => 'success',
-                    'message' => 'Category restored successfully'
-                ], 200);
+                    'status'  => 'error',
+                    'message' => 'Category not found or not in trash'
+                ], 404);
             }
 
-            return response()->json(['status' => 'error', 'message' => 'Category not found or not in trash'], 404);
-        } catch (\Throwable $th) {
-            return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500);
-        }
-    }
-    /**
-     * Get all trashed categories (មើលផលិតផលដែលបានលុប).
-     */
-    public function getTrashedCategories()
-    {
-        try {
-            // ទាញយកតែអ្វីដែលបានលុប (Soft Deleted)
-            $trashedCategories = Category::onlyTrashed()->get();
-            
+            $category->restore();
+
             return response()->json([
-                'status' => 'success', 
-                'data' => $trashedCategories
+                'status'  => 'success',
+                'message' => 'Category restored successfully'
             ], 200);
+
         } catch (\Throwable $th) {
             return response()->json([
-                'status' => 'error', 
+                'status'  => 'error',
                 'message' => $th->getMessage()
             ], 500);
         }
     }
 
     /**
-     * Force delete a category permanently (លុបចោលទាំងស្រុង).
+     * Get all trashed categories.
+     */
+    public function getTrashedCategories()
+    {
+        try {
+            $trashedCategories = Category::onlyTrashed()->get();
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $trashedCategories
+            ], 200);
+
+        } catch (\Throwable $th) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Force Delete permanently.
      */
     public function forceDelete($id)
     {
         try {
             $category = Category::withTrashed()->find($id);
-            
-            if ($category) {
-                // លុបរូបភាពចោលពី Storage
-                if ($category->image) {
-                    Storage::disk('public')->delete($category->image);
-                }
-                
-                $category->forceDelete();
-                
+
+            if (!$category) {
                 return response()->json([
-                    'status' => 'success',
-                    'message' => 'Category permanently deleted'
-                ], 200);
+                    'status'  => 'error',
+                    'message' => 'Category not found'
+                ], 404);
             }
-            
+
+            if ($category->image) {
+                Storage::disk('public')->delete($category->image);
+            }
+
+            $category->forceDelete();
+
             return response()->json([
-                'status' => 'error', 
-                'message' => 'Category not found'
-            ], 404);
-            
+                'status'  => 'success',
+                'message' => 'Category permanently deleted'
+            ], 200);
+
         } catch (\Throwable $th) {
             return response()->json([
-                'status' => 'error', 
+                'status'  => 'error',
                 'message' => $th->getMessage()
             ], 500);
         }

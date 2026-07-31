@@ -15,8 +15,8 @@ return new class extends Migration
         $table->id();
         $table->string('name');
         $table->string('email')->unique();
-        $table->string('phone'); // 👈 បន្ថែមបន្ទាត់នេះ
-        $table->string('role')->default('customer'); // 👈 បន្ថែមបន្ទាត់នេះ (កំណត់ឱ្យវាអូតូជា customer)
+        $table->string('phone');
+        $table->string('role')->default('customer');
         $table->timestamp('email_verified_at')->nullable();
         $table->string('password');
         $table->rememberToken();

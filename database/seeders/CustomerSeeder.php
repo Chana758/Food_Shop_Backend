@@ -45,7 +45,7 @@ class CustomerSeeder extends Seeder
             ],
             [
                 'name' => 'Seyha Long',
-                'email' => 'seyha@ .com',
+                'email' => 'seyha@.com',
                 'password' => Hash::make('password123'),
                 'phone' => '099999000',
                 'role' => 'customer',

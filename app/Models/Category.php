@@ -9,10 +9,10 @@ class Category extends Model
 {
     use HasFactory;
 
-    // កំណត់ទិន្នន័យដែលអាចឱ្យបញ្ចូលបាន
+     // Mass assignable attributes
     protected $fillable = ['name', 'slug', 'image', 'description'];
 
-    // Relationship: មួយ Category មានច្រើន Products
+    // Relationship: A category has many products
     public function products()
     {
         return $this->hasMany(Product::class);

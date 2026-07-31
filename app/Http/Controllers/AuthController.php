@@ -9,84 +9,85 @@ use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
-    //
+                                                                                                                                                                                                                                                                                                                                                         
     public function register(Request $request){
-        // 1. Validation: ត្រួតពិនិត្យទិន្នន័យដែលផ្ញើមកពី Frontend (React) ថាត្រឹមត្រូវតាមលក្ខខណ្ឌឬអត់
+        // Validate registration request
         $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
             'phone' => 'required|string|max:20',
             'password' => 'required|string|min:8|confirmed',
-        ]);
+        ]); 
         try {
-            // 2. Eloquent Create: បញ្ជាឱ្យ Model User បង្កើតទិន្នន័យថ្មីទៅក្នុង Table 'users'
+            // Create new user
             $user = User::create([
                 'name' => $request->name,
                 'email' => $request->email,
                 'phone' => $request->phone,
-                'password' => Hash::make($request->password), /// បំប្លែងលេខសម្ងាត់ឱ្យទៅជាកូដសម្ងាត់ (Encryption) ដើម្បីសុវត្ថិភាព
-                'role' => 'customer', // កំណត់តួនាទីជា 'customer' (អតិថិជន) ដោយស្វ័យប្រវត្តិ
+                'password' => Hash::make($request->password),// Encryption password
+                'role' => 'customer', //default role customer
             ]);
-            // 3. Create Token: បង្កើត "សោរសម្ងាត់" (API Token) សម្រាប់ឱ្យ User ប្រើដើម្បីចូលទៅកាន់ API ផ្សេងៗ
+            // Generate access token
             $token = $user->createToken('auth_token')->plainTextToken;
-            // 4. Response: ត្រឡប់តម្លៃទៅកាន់ Frontend (React) ជាទ្រង់ទ្រាយ JSON ដែលមានទាំងព័ត៌មានអ្នកប្រើ និងសោរសម្ងាត់
+
+            // Return successful response
             return response()->json([
                 'status' => 'success',
                 'message' => 'User registered successfully',
-                'user' => $user, // ផ្ញើព័ត៌មាន User ដែលទើបបង្កើតទៅឱ្យ React
-                'access_token' => $token, // ផ្ញើ Token ទៅឱ្យ React រក្សាទុក
-                'token_type' => 'Bearer', // ប្រភេទនៃ Token (សម្រាប់ដាក់ក្នុង Header ពេលបាញ់ API ក្រោយៗ)
+                'user' => $user,
+                'access_token' => $token, 
+                'token_type' => 'Bearer', 
                 
-                ], 201); // // លេខកូដ HTTP 201 មានន័យថា 'Created' (ត្រូវបានបង្កើត)
+                ], 201); 
         } catch (\Throwable $th) {
             //throw $th;
             return response()->json([
                 'status' => 'error',
-                'message' => 'Registration failed: ' . $th->getMessage(), // បង្ហាញសារ error ប្រសិនបើមានបញ្ហា
-            ], 500); // លេខកូដ HTTP 500 មានន័យថា 'Internal Server Error' (កំហុសនៅក្នុងម៉ាស៊ីនមេ)
+                'message' => 'Registration failed: ' . $th->getMessage(), 
+            ], 500); 
         }
     }
    /**
- * មុខងារចូលប្រើប្រាស់ប្រព័ន្ធ (Login Function)
+ * Login function
  */
     public function login(Request $request) {
         
-        // ១. Validation: ត្រួតពិនិត្យថា តើ User បានបញ្ចូល Email និង Password ហើយឬនៅ
+        // Validate login request
         $request->validate([
             'email'    => 'required|email',    
             'password' => 'required',          
         ]);
 
         try {
-            // ២. Attempt Login: ប្រើ Auth::attempt ដើម្បីផ្ទៀងផ្ទាត់ Email និង Password ជាមួយ Database
-            // វាជួយ Hash password ដែលផ្ញើមក រួចទៅធៀបជាមួយ Hash ក្នុង DB ដោយស្វ័យប្រវត្តិ
+            // Authenticate user credentials against the database
+            // Automatically compares the provided password with the hashed password
             if (!Auth::attempt($request->only('email', 'password'))) {
                 
-                // បើផ្ទៀងផ្ទាត់មិនជោគជ័យ (ខុស Email ឬ ខុស Password)
+                // Return error if authentication fails
                 return response()->json([
                     'status'  => 'error',
                     'message' => 'Invalid email or password'
-                ], 401); // 401 មានន័យថា Unauthorized (គ្មានសិទ្ធិចូល)
+                ], 401);// 401 Unauthorized
             }
 
-            // ៣. Get User Data: បើត្រឹមត្រូវ យើងទាញយកព័ត៌មានរបស់ User នោះចេញពី Database
+            // Retrieve authenticated user
             $user = User::where('email', $request->email)->firstOrFail();
 
-            // ៤. Create New Token: បង្កើត "សោរសម្ងាត់" ថ្មីមួយសម្រាប់រដូវកាល (Session) នេះ
+            // Generate new access token
             $token = $user->createToken('auth_token')->plainTextToken;
 
-            // ៥. Success Response: បញ្ជូនទិន្នន័យ User និង Token ទៅឱ្យ React
+            // Return user data and access token
             return response()->json([
                 'status'       => 'success',
                 'message'      => 'you have successfully logged in',
-                'user'           => $user,                   // ផ្ញើព័ត៌មាន User (រួមទាំង Role គាត់)
-                'access_token' => $token,                  // ផ្ញើ Token ទៅឱ្យ React រក្សាទុកក្នុង LocalStorage
+                'user'           => $user,                   // Return user information (including role)
+                'access_token' => $token,                  // Send token to React for localStorage storage
                 'token_type'   => 'Bearer',
-            ], 200); // 200 មានន័យថា OK (ជោគជ័យ)
+            ], 200);
 
         } catch (\Exception $e) {
             
-            // ៦. Error Handling: បើមានបញ្ហាបច្ចេកទេសអ្វីមួយកើតឡើង
+            // Handle server errors
             return response()->json([
                 'status'  => 'error',
                 'message' => 'There is a technical issue: ' . $e->getMessage(),

@@ -9,20 +9,42 @@ use Illuminate\Support\Facades\Storage;
 class ProductController extends Controller
 {
     /**
-     * Display a listing of the resource.
+     * Display a listing with Search + Category filter + Pagination from Backend
      */
     public function index(Request $request)
     {
         try {
-            // យើងប្រើ with('category') ដើម្បីទាញយកទិន្នន័យពីតារាង Category មកជាមួយ
-            $products = Product::with('category')->paginate(15);
-            
+            $perPage      = $request->query('per_page', 15);
+            $search       = $request->query('search', '');
+            $categorySlug = $request->query('category_slug', '');
+
+            $products = Product::with('category')
+                // ✅ wrap name/description OR inside its own group
+                // ដើម្បី​កុំ​ឲ្យ orWhere "leak" ចូល​ប៉ះ category filter ខាងក្រោម
+                ->when($search, function ($query) use ($search) {
+                    $query->where(function ($q) use ($search) {
+                        $q->where('name', 'LIKE', "%{$search}%")
+                          ->orWhere('description', 'LIKE', "%{$search}%");
+                    });
+                })
+                // filter by category slug directly in DB
+                ->when($categorySlug, function ($query) use ($categorySlug) {
+                    $query->whereHas('category', function ($q) use ($categorySlug) {
+                        $q->where('slug', $categorySlug);
+                    });
+                })
+                ->paginate($perPage);
+
             return response()->json([
-                'status' => 'success', 
+                'status' => 'success',
                 'data'   => $products
             ], 200);
+
         } catch (\Throwable $th) {
-            return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500);
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
     }
 
@@ -48,7 +70,7 @@ class ProductController extends Controller
             ]);
 
             if ($request->hasFile('image')) {
-                $file = $request->file('image');
+                $file     = $request->file('image');
                 $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
                 $file->storeAs('products', $filename, 'public');
                 $validatedData['image'] = 'products/' . $filename;
@@ -56,9 +78,16 @@ class ProductController extends Controller
 
             $product = Product::create($validatedData);
 
-            return response()->json(['status' => 'success', 'data' => $product], 201);
+            return response()->json([
+                'status' => 'success',
+                'data'   => $product
+            ], 201);
+
         } catch (\Throwable $th) {
-            return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500);
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
     }
 
@@ -68,10 +97,18 @@ class ProductController extends Controller
     public function show($id)
     {
         $product = Product::with('category')->find($id);
+
         if (!$product) {
-            return response()->json(['status' => 'error', 'message' => 'Product Not Found!'], 404);
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Product not found'
+            ], 404);
         }
-        return response()->json(['status' => 'success', 'data' => $product], 200);
+
+        return response()->json([
+            'status' => 'success',
+            'data'   => $product
+        ], 200);
     }
 
     /**
@@ -99,37 +136,46 @@ class ProductController extends Controller
                 if ($product->image) {
                     Storage::disk('public')->delete($product->image);
                 }
-                $file = $request->file('image');
+                $file     = $request->file('image');
                 $filename = time() . '_' . $file->getClientOriginalName();
-                $file->storeAs("products", $filename, 'public');
-                $validatedData['image'] = "products/" . $filename;
+                $file->storeAs('products', $filename, 'public');
+                $validatedData['image'] = 'products/' . $filename;
             }
 
             $product->update($validatedData);
 
             return response()->json([
-                'status' => 'success', 
-                'message' => 'Product updated successfully!', 
-                'data' => $product
+                'status'  => 'success',
+                'message' => 'Product updated successfully',
+                'data'    => $product
             ], 200);
+
         } catch (\Throwable $th) {
-            return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500); 
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
     }
 
     /**
-     * Remove the specified resource from storage (Soft Delete).
+     * Soft Delete
      */
     public function destroy(Product $product)
     {
         try {
-            // ដោយសារយើងប្រើ SoftDelete យើងមិនចាំបាច់លុបរូបភាពចោលទេ (តាមចិត្តចង់)
-            // តែបើចង់ឱ្យស្អាត អាចលុបរូបភាពបាន
-            $product->delete(); // ផលិតផលនឹងមិនបាត់ពី DB ទេ គ្រាន់តែមាន deleted_at
-            
-            return response()->json(['status' => 'success', 'message' => 'Product moved to trash'], 200);
+            $product->delete();
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Product moved to trash'
+            ], 200);
+
         } catch (\Throwable $th) {
-            return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500);
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
     }
 
@@ -138,47 +184,83 @@ class ProductController extends Controller
      */
     public function restore($id)
     {
-        $product = Product::withTrashed()->find($id);
-        if ($product) {
+        try {
+            $product = Product::withTrashed()->find($id);
+
+            if (!$product) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Product not found'
+                ], 404);
+            }
+
             $product->restore();
+
             return response()->json([
-                'status' => 'success',
+                'status'  => 'success',
                 'message' => 'Product restored'
             ], 200);
+
+        } catch (\Throwable $th) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
-        return response()->json([
-            'status' => 'error', 
-            'message' => 'Product not found'
-        ], 404);
     }
+
+    /**
+     * Force Delete permanently.
+     */
     public function forceDelete($id)
     {
-        $product = Product::withTrashed()->find($id);
-        if ($product) {
+        try {
+            $product = Product::withTrashed()->find($id);
+
+            if (!$product) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Product not found'
+                ], 404);
+            }
+
             if ($product->image) {
                 Storage::disk('public')->delete($product->image);
             }
+
             $product->forceDelete();
+
             return response()->json([
-                'status' => 'success',
+                'status'  => 'success',
                 'message' => 'Product permanently deleted'
             ], 200);
+
+        } catch (\Throwable $th) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
-        return response()->json([
-            'status' => 'error', 
-            'message' => 'Product not found'
-        ], 404);
     }
-   
+
+    /**
+     * Get all trashed products.
+     */
     public function getTrashedProducts()
     {
-    // ប្រើ onlyTrashed ដើម្បីទាញយកតែរបស់ដែលបានលុប
-    $trashedProducts = Product::onlyTrashed()->with('category')->get();
-    
-    return response()->json([
-        'status' => 'success', 
-        'data' => $trashedProducts
-    ], 200);
-}
-                
+        try {
+            $trashedProducts = Product::onlyTrashed()->with('category')->get();
+
+            return response()->json([
+                'status' => 'success',
+                'data'   => $trashedProducts
+            ], 200);
+
+        } catch (\Throwable $th) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
+        }
+    }
 }

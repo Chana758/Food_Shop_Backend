@@ -64,11 +64,9 @@ class UserController extends Controller
 
     /**
      * Update existing staff information.
-     * Password is excluded to avoid errors.
      */
-    public function updatestaff(Request $request, $id) 
+    public function updateStaff(Request $request, $id) 
     {
-        // Validate inputs, allowing the email to remain the same for the current user ID
         $request->validate([
             'name'  => 'required|string|max:255',
             'email' => 'required|email|unique:users,email,' . $id,
@@ -77,7 +75,6 @@ class UserController extends Controller
 
         try {
             $staff = User::findOrFail($id);
-            // Only update specific fields
             $staff->update($request->only(['name', 'email', 'phone']));
             
             return response()->json([
@@ -96,7 +93,7 @@ class UserController extends Controller
     /**
      * Delete a staff member.
      */
-    public function destroystaff($id) 
+    public function destroyStaff($id) 
     {
         try {
             $staff = User::findOrFail($id);
@@ -132,46 +129,47 @@ class UserController extends Controller
             ], 500);
         }
     }
-    /**
- * Create a new customer.
- */
-public function storeCustomer(Request $request) 
-{
-    $request->validate([
-        'name'     => 'required|string|max:255',
-        'email'    => 'required|email|unique:users,email',
-        'phone'    => 'nullable|string|max:20',
-        'password' => 'required|string|min:8', 
-    ]);
 
-    try {
-        $customer = User::create([
-            'name'     => $request->name,
-            'email'    => $request->email,
-            'phone'    => $request->phone,
-            'password' => Hash::make($request->password), 
-            'role'     => 'customer',
-            'status'   => 'active', 
+    /**
+     * Create a new customer.
+     */
+    public function storeCustomer(Request $request) 
+    {
+        $request->validate([
+            'name'     => 'required|string|max:255',
+            'email'    => 'required|email|unique:users,email',
+            'phone'    => 'nullable|string|max:20',
+            'password' => 'required|string|min:8', 
         ]);
 
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'Customer created successfully',
-            'data'    => $customer
-        ], 201);
-    } catch (\Throwable $th) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => $th->getMessage()
-        ], 500);
+        try {
+            $customer = User::create([
+                'name'     => $request->name,
+                'email'    => $request->email,
+                'phone'    => $request->phone,
+                'password' => Hash::make($request->password), 
+                'role'     => 'customer',
+                'status'   => 'active', 
+            ]);
+
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Customer created successfully',
+                'data'    => $customer
+            ], 201);
+        } catch (\Throwable $th) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
+        }
     }
-}
+
     /**
      * Update specific customer information.
      */
     public function updateCustomer(Request $request, $id) 
     {
-        // Validate incoming request data
         $request->validate([
             'name'  => 'required|string|max:255',
             'email' => 'required|email|unique:users,email,' . $id,
@@ -181,7 +179,6 @@ public function storeCustomer(Request $request)
         try {
             $user = User::findOrFail($id);
             
-            // Update only authorized fields
             $user->update($request->only(['name', 'email', 'phone']));
             
             return response()->json([
@@ -195,30 +192,33 @@ public function storeCustomer(Request $request)
             ], 500);
         }
     }
-    // delete customer 
-    public function destroyCustomer($id) 
-{
-    try {
-        $customer = User::findOrFail($id);
-        
-        // ធានាថាលុបតែ User ដែលមាន role ជា customer ប៉ុណ្ណោះ
-        if ($customer->role !== 'customer') {
-            return response()->json(['status' => 'error', 'message' => 'Unauthorized action'], 403);
-        }
 
-        $customer->delete();
-        
-        return response()->json([
-            'status'  => 'success',
-            'message' => 'Customer removed successfully'
-        ], 200);
-    } catch (\Throwable $th) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => $th->getMessage()
-        ], 500);
+    /**
+     * Delete a customer.
+     */
+    public function destroyCustomer($id) 
+    {
+        try {
+            $customer = User::findOrFail($id);
+            
+            if ($customer->role !== 'customer') {
+                return response()->json(['status' => 'error', 'message' => 'Unauthorized action'], 403);
+            }
+
+            $customer->delete();
+            
+            return response()->json([
+                'status'  => 'success',
+                'message' => 'Customer removed successfully'
+            ], 200);
+        } catch (\Throwable $th) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $th->getMessage()
+            ], 500);
         }
     }
+
     /**
      * Toggle status between 'active' and 'blocked'.
      */
@@ -233,7 +233,6 @@ public function storeCustomer(Request $request)
                 ], 403);
             }
 
-            // change status: if blocked to active, if active to blocked
             $newStatus = ($customer->status === 'blocked') ? 'active' : 'blocked';
             $customer->update(['status' => $newStatus]);
             
