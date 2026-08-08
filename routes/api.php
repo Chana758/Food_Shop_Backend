@@ -18,7 +18,7 @@ use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\ReservationController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RiderController;
-use App\Http\Controllers\API\Admin\ReportController;
+use App\Http\Controllers\Api\Admin\ReportController;
 use App\Http\Controllers\API\BackupController;
 use App\Http\Controllers\Api\Admin\SettingController;
 

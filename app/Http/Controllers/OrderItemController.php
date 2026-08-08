@@ -10,7 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
-class OrderController extends Controller
+class OrderItemController extends Controller
 {
     private const VALID_STATUSES = [
         'pending', 'cooking', 'served', 'paid', 'cancelled',
