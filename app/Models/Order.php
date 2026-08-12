@@ -16,6 +16,15 @@ class Order extends Model
         'order_type',
         'status',
         'total_amount',
+        //  FIX: was missing from $fillable. OrderController::store()
+        // now mass-assigns 'discount_amount' via Order::create([...]) —
+        // without this, Laravel silently drops the field (mass-assignment
+        // protection) and every order would be saved with discount_amount
+        // = 0 regardless of what the POS staff actually applied, even
+        // though total_amount itself would still be correctly discounted.
+        // Keeping discount_amount accurate matters for reporting/receipts
+        // that need to show "subtotal - discount = total" separately.
+        'discount_amount',
         'notes',
         // Delivery fields
         'customer_name',

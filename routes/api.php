@@ -266,12 +266,11 @@ Route::middleware(['auth:sanctum', 'check.blocked'])->group(function () {
 
         // Backups — database backup management
         Route::prefix('admin/backups')->group(function () {
-            Route::get('/',              [BackupController::class, 'index']);
-            Route::post('/',             [BackupController::class, 'store']);
-            Route::get('/download',      [BackupController::class, 'download']);
-            Route::delete('/{fileName}', [BackupController::class, 'destroy']);
+            Route::get('/',                    [BackupController::class, 'index']);
+            Route::post('/',                   [BackupController::class, 'store']);
+            Route::get('/{fileName}/download', [BackupController::class, 'download']); 
+            Route::delete('/{fileName}',       [BackupController::class, 'destroy']);
         });
-
     });
 
 });

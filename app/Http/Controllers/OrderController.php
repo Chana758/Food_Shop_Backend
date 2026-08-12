@@ -6,14 +6,48 @@ use App\Events\OrderStatusChanged;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\Rider;
+use App\Services\InventoryService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class OrderController extends Controller
 {
+    /**
+     * All statuses that are considered valid on the `orders` table.
+     * Used for general validation (e.g. filtering in index()).
+     */
     private const VALID_STATUSES = [
         'pending', 'cooking', 'served', 'paid', 'cancelled',
+    ];
+
+    /**
+     * FIX: Statuses an admin is allowed to set directly through
+     * PUT /admin/orders/:id.
+     *
+     * ROOT CAUSE OF THE BUG: 'paid' used to be included in the statuses
+     * accepted by update(). That let an admin mark an order 'paid'
+     * directly from the Order Management screen WITHOUT ever creating
+     * or confirming a matching Payment record. Two systems of record
+     * (orders.status and payments.status) could then disagree — the
+     * order looked paid, but there was no Payment row to show it, no
+     * paid_at timestamp, no transaction_ref. That silently broke:
+     *   - PaymentController::stats()  (sums Payment.status = 'paid')
+     *   - OrderController::stats()    (sums Order.status = 'paid')
+     *     → these two revenue figures could diverge with no way to
+     *       reconcile which one was "correct".
+     *   - PaymentManagement.jsx admin screen, which would never show
+     *     this order as pending/paid because no Payment row exists.
+     *
+     * 'paid' must only ever be reached via PaymentController::confirm()
+     * or PaymentController::checkStatus() (Bakong-verified), which are
+     * the single source of truth for "money has actually moved". This
+     * endpoint keeps the kitchen/service workflow (pending → cooking →
+     * served) and cancellation, but payment confirmation is deliberately
+     * out of scope here.
+     */
+    private const ADMIN_UPDATABLE_STATUSES = [
+        'pending', 'cooking', 'served', 'cancelled',
     ];
 
     private const VALID_ORDER_TYPES = [
@@ -24,29 +58,14 @@ class OrderController extends Controller
         'unassigned', 'assigned', 'picked_up', 'on_the_way', 'delivered', 'failed',
     ];
 
+    public function __construct(
+        private readonly InventoryService $inventory
+    ) {}
+
     /**
-     * ✅ NEW — fire an OrderStatusChanged broadcast without ever letting a
-     * failure escape.
-     *
-     * ROOT CAUSE OF THE BUG: every DB::afterCommit(fn () => event(...))
-     * callback in this controller ran INSIDE the same try/catch block as
-     * the database work above it. By the time afterCommit fires, the
-     * transaction has already committed successfully — stock is
-     * decremented, the order row exists. But if broadcasting throws
-     * (e.g. Reverb isn't running: "cURL error 7: Failed to connect to
-     * 127.0.0.1 port 8080"), that exception was caught by the SAME
-     * catch (\Throwable $th) block and turned into a 500 response with
-     * the raw connection error leaked straight to the customer's browser
-     * — even though their order had already gone through. The customer
-     * saw "Order Failed" for an order that actually succeeded, with no
-     * way to know it, risking a duplicate order and a double stock
-     * deduction if they retried.
-     *
-     * Broadcasting a "hey, something changed" notification is a
-     * nice-to-have for the admin dashboard's real-time updates. It must
-     * never be allowed to make an already-successful business operation
-     * look like it failed. So every call site below is now wrapped here:
-     * failures are logged for ops visibility, then swallowed.
+     * Fire an OrderStatusChanged broadcast without ever letting a
+     * broadcast failure turn an already-successful DB write into an
+     * error response for the caller (e.g. Reverb not running).
      */
     private function safeBroadcast(Order $order, string $newStatus): void
     {
@@ -55,6 +74,38 @@ class OrderController extends Controller
         } catch (\Throwable $th) {
             Log::warning("OrderController: broadcast failed for order #{$order->id} (status: {$newStatus}) — {$th->getMessage()}");
         }
+    }
+
+    /**
+     * ✅ NEW — shared helper for computing an item's effective unit price.
+     *
+     * ROOT CAUSE OF THE BUG THIS FIXES: the old code used
+     * `$product->discount_price ?? $product->price`. PHP's `??` only
+     * falls back when the left side is NULL — but legacy/bad data had
+     * stored `discount_price = "0.00"` (a non-null zero) for products
+     * with no real discount. Since 0.00 is not null, `??` treated it as
+     * "the real discount price" and priced the item at $0.00 instead of
+     * falling back to `price`. That silently zeroed out order totals
+     * (see Order #40 in production: total_amount ended up $0.00).
+     *
+     * This mirrors the exact same "is there a valid discount" rule the
+     * frontend already uses in priceUtils.js (`hasDiscount()`): a
+     * discount only counts if it's > 0, strictly less than the original
+     * price, AND (if an expiry is set) not yet expired. Keeping this
+     * logic in one place means the backend and frontend can never
+     * disagree about whether a product is "on sale" right now.
+     */
+    private function effectiveUnitPrice(Product $product): float
+    {
+        $price    = (float) $product->price;
+        $discount = $product->discount_price;
+
+        $hasValidDiscount = $discount !== null
+            && (float) $discount > 0
+            && (float) $discount < $price
+            && (! $product->discount_expires_at || \Carbon\Carbon::parse($product->discount_expires_at)->isFuture());
+
+        return $hasValidDiscount ? (float) $discount : $price;
     }
 
     // ──────────────────────────────────────────────
@@ -116,13 +167,17 @@ class OrderController extends Controller
 
     /**
      * PUT /api/admin/orders/:id
-     * Admin updates order status, table, or notes.
+     * Admin updates order status (kitchen/service workflow only —
+     * NOT payment confirmation, see ADMIN_UPDATABLE_STATUSES above),
+     * table, or notes.
      */
     public function update(Request $request, Order $order)
     {
         try {
             $validated = $request->validate([
-                'status'   => 'sometimes|in:' . implode(',', self::VALID_STATUSES),
+                //  FIX: restricted to ADMIN_UPDATABLE_STATUSES instead
+                // of VALID_STATUSES — 'paid' is no longer settable here.
+                'status'   => 'sometimes|in:' . implode(',', self::ADMIN_UPDATABLE_STATUSES),
                 'table_id' => 'nullable|exists:tables,id',
                 'notes'    => 'nullable|string',
             ]);
@@ -132,17 +187,14 @@ class OrderController extends Controller
                     ($validated['status'] ?? null) === 'cancelled' &&
                     $order->status !== 'cancelled'
                 ) {
-                    foreach ($order->items as $item) {
-                        $item->product()->increment('stock_quantity', $item->quantity);
-                    }
+                    // ✅ FIX: centralized via InventoryService instead of
+                    // a local foreach + increment() copy-pasted here.
+                    $this->inventory->restoreStock($order);
                 }
                 $order->update($validated);
             });
 
             if (isset($validated['status'])) {
-                // ✅ FIX — was event(new OrderStatusChanged(...)) directly;
-                // now routed through safeBroadcast() so a Reverb outage
-                // can't turn this already-successful update into a 500.
                 DB::afterCommit(function () use ($order, $validated) {
                     $this->safeBroadcast($order->fresh(), $validated['status']);
                 });
@@ -154,6 +206,12 @@ class OrderController extends Controller
                 'data'    => $order->fresh('items.product', 'table', 'user', 'rider'),
             ], 200);
 
+        } catch (\Illuminate\Validation\ValidationException $ve) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => $ve->getMessage(),
+                'errors'  => $ve->errors(),
+            ], 422);
         } catch (\Throwable $th) {
             Log::error('OrderController@update: ' . $th->getMessage());
             return response()->json([
@@ -172,9 +230,8 @@ class OrderController extends Controller
         try {
             DB::transaction(function () use ($order) {
                 if (! in_array($order->status, ['paid', 'cancelled'])) {
-                    foreach ($order->items as $item) {
-                        $item->product()->increment('stock_quantity', $item->quantity);
-                    }
+                    // ✅ FIX: centralized via InventoryService.
+                    $this->inventory->restoreStock($order);
                 }
                 $order->delete();
             });
@@ -219,9 +276,6 @@ class OrderController extends Controller
 
         try {
             DB::transaction(function () use ($order, $validated) {
-                // If reassigning to a different rider, free up the
-                // previous rider first so they go back into the
-                // available pool.
                 if ($order->rider_id && $order->rider_id !== $validated['rider_id']) {
                     Rider::where('id', $order->rider_id)->update(['status' => 'available']);
                 }
@@ -234,7 +288,6 @@ class OrderController extends Controller
                 Rider::where('id', $validated['rider_id'])->update(['status' => 'busy']);
             });
 
-            // ✅ FIX — routed through safeBroadcast()
             DB::afterCommit(function () use ($order) {
                 $this->safeBroadcast($order->fresh('rider'), 'assigned');
             });
@@ -283,7 +336,6 @@ class OrderController extends Controller
                 }
             });
 
-            // FIX — routed through safeBroadcast()
             DB::afterCommit(function () use ($order, $validated) {
                 $this->safeBroadcast($order->fresh('rider'), $validated['delivery_status']);
             });
@@ -309,7 +361,27 @@ class OrderController extends Controller
 
     /**
      * POST /api/orders
-     * Customer places a dine-in / takeaway / delivery order.
+     * Customer / POS places a dine-in / takeaway / delivery order.
+     *
+     * FIX #1 (discount_amount): added optional POS staff discount.
+     * Previously the POS screen (ManagementSaler.jsx) let staff apply a
+     * manual $ or % discount and showed the discounted "grandTotal" in
+     * the cart, on the printed receipt, and even fed it as the `amount`
+     * shown on the generated KHQR QR code — but never sent that discount
+     * to this endpoint. This endpoint always computed total_amount purely
+     * from item price × quantity, so `orders.total_amount` (and, in turn,
+     * `payments.amount`, since PaymentController::store() copies
+     * order.total_amount) silently ended up LARGER than what the
+     * customer actually saw and paid.
+     *
+     * FIX #2 (unit price lookup): see effectiveUnitPrice() above —
+     * `discount_price ?? price` broke on legacy rows where
+     * discount_price was stored as 0.00 instead of null, zeroing out
+     * the item's price (and therefore the whole order total).
+     *
+     * The discount is validated and clamped server-side (never trusts
+     * the client's pre-computed grand total) so a tampered/stale client
+     * value can't under- or over-charge what's stored.
      */
     public function store(Request $request)
     {
@@ -320,6 +392,7 @@ class OrderController extends Controller
             'customer_name'      => 'required_if:order_type,delivery|nullable|string|max:255',
             'customer_phone'     => 'required_if:order_type,delivery|nullable|string|max:20',
             'delivery_address'   => 'required_if:order_type,delivery|nullable|string',
+            'discount_amount'    => 'nullable|numeric|min:0', // ✅ POS staff discount
             'items'              => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity'   => 'required|integer|min:1',
@@ -349,7 +422,9 @@ class OrderController extends Controller
                         throw new \Exception("Insufficient stock for: {$product->name}.");
                     }
 
-                    $price        = $product->discount_price ?? $product->price;
+                    // ✅ FIX: was `$product->discount_price ?? $product->price`
+                    // — see effectiveUnitPrice() docblock for why that broke.
+                    $price        = $this->effectiveUnitPrice($product);
                     $lineSubtotal = $price * $item['quantity'];
                     $totalAmount += $lineSubtotal;
 
@@ -364,12 +439,22 @@ class OrderController extends Controller
                     $product->decrement('stock_quantity', $item['quantity']);
                 }
 
+                // ✅ never trust the client-supplied discount blindly —
+                // clamp it to [0, subtotal] so total_amount can't go negative
+                // or exceed the real subtotal even if the frontend sends a
+                // stale/tampered value.
+                $discountAmount = min(
+                    max((float) ($validated['discount_amount'] ?? 0), 0),
+                    $totalAmount
+                );
+
                 $order = Order::create([
                     'user_id'          => auth()->id(),
                     'table_id'         => $validated['table_id'] ?? null,
                     'order_type'       => $validated['order_type'],
                     'status'           => 'pending',
-                    'total_amount'     => $totalAmount,
+                    'total_amount'     => $totalAmount - $discountAmount, // ✅ discounted total — matches what's shown/paid
+                    'discount_amount'  => $discountAmount,                // ✅ kept for reporting/receipts
                     'notes'            => $validated['notes'] ?? null,
                     'customer_name'    => $validated['customer_name']    ?? null,
                     'customer_phone'   => $validated['customer_phone']   ?? null,
@@ -384,13 +469,6 @@ class OrderController extends Controller
                 return $order;
             });
 
-            //  FIX — THIS is the exact line that caused the bug. It used
-            // to be `event(new OrderStatusChanged(...))` directly, so a
-            // Reverb connection failure here threw an exception that got
-            // caught below and returned as a 500 to the customer — AFTER
-            // their order had already been created and stock already
-            // decremented. Now routed through safeBroadcast(), which logs
-            // the failure but never lets it affect the HTTP response.
             DB::afterCommit(function () use ($order) {
                 $this->safeBroadcast(
                     $order->fresh('items.product', 'table', 'user', 'rider'),
@@ -443,6 +521,13 @@ class OrderController extends Controller
     /**
      * POST /api/orders/{order}/cancel
      * Customer cancels their own pending order; restores stock.
+     *
+     * NOTE: this is also called by the POS screen (ManagementSaler.jsx)
+     * when staff abandon a KHQR scan mid-flow, and by Checkout.jsx when
+     * a customer's KHQR QR expires or they navigate away — so ownership
+     * here effectively covers both "customer cancels their own order"
+     * and "staff cancels the order they just placed at the counter"
+     * (POS orders are created with auth()->id() = the staff member).
      */
     public function cancel(Order $order)
     {
@@ -462,13 +547,11 @@ class OrderController extends Controller
 
         try {
             DB::transaction(function () use ($order) {
-                foreach ($order->items as $item) {
-                    $item->product()->increment('stock_quantity', $item->quantity);
-                }
+                // FIX: centralized via InventoryService.
+                $this->inventory->restoreStock($order);
                 $order->update(['status' => 'cancelled']);
             });
 
-            //  FIX — routed through safeBroadcast()
             DB::afterCommit(function () use ($order) {
                 $this->safeBroadcast($order->fresh(), 'cancelled');
             });

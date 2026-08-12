@@ -169,8 +169,25 @@ class PaymentController extends Controller
 
     /**
      * POST /api/payments
-     * FIX: ព័ទ្ធជុំវិញ file upload + Payment::create() ជាមួយ DB::transaction
-     * ដើម្បីកុំឲ្យសល់ orphaned file ក្នុង storage បើ create() fail ក្រោយ upload success
+     *
+     * FIX (kept): wraps file upload + Payment::create() in DB::transaction
+     * so a failed create() doesn't leave an orphaned file in storage.
+     *
+     * FIX (new): previously ANY existing 'pending' payment on the order
+     * blocked a new one from being created with a 422. That looked correct
+     * for double-submission protection, but it also permanently broke the
+     * legitimate "Generate New QR" retry flow (POSKhqrModal.jsx /
+     * Checkout.jsx) — once a KHQR QR expired, the stale pending Payment row
+     * was never cleared, so every retry attempt hit this 422 forever, and
+     * the only way to actually pay for that order was for an admin to
+     * manually intervene in the database.
+     *
+     * The correct behavior: only a PAID payment should block a new one
+     * (you can't pay twice). Any old PENDING payment for the same order is
+     * stale by definition — the customer is here trying to pay again — so
+     * we void it (status -> 'rejected') and let a fresh pending Payment be
+     * created. This keeps "you can never double-pay" while unblocking
+     * "you can always retry an unpaid order".
      */
     public function store(Request $request)
     {
@@ -181,21 +198,29 @@ class PaymentController extends Controller
             'receipt_image'   => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
         ]);
 
+        $receiptPath = null;
+
         try {
             $order = Order::findOrFail($validated['order_id']);
 
-            $existingPending = Payment::where('order_id', $order->id)
-                ->whereIn('status', ['pending', 'paid'])
+            $alreadyPaid = Payment::where('order_id', $order->id)
+                ->where('status', 'paid')
                 ->exists();
 
-            if ($existingPending) {
+            if ($alreadyPaid) {
                 return response()->json([
                     'status'  => 'error',
-                    'message' => 'A pending or paid payment already exists for this order.',
+                    'message' => 'This order has already been paid.',
                 ], 422);
             }
 
-            $receiptPath = null;
+            // ✅ FIX: void stale pending payments instead of blocking retries.
+            // This intentionally happens OUTSIDE the create transaction below —
+            // even if create() subsequently fails, we don't want to resurrect
+            // a stale pending row as "the" payment for this order.
+            Payment::where('order_id', $order->id)
+                ->where('status', 'pending')
+                ->update(['status' => 'rejected']);
 
             $payment = DB::transaction(function () use ($request, $validated, $order, &$receiptPath) {
                 if ($request->hasFile('receipt_image')) {
@@ -205,6 +230,11 @@ class PaymentController extends Controller
                 return Payment::create([
                     'order_id'        => $order->id,
                     'user_id'         => auth()->id(),
+                    // ✅ order.total_amount already reflects any staff/POS
+                    // discount applied at order-creation time (see
+                    // OrderController::store()), so this always matches what
+                    // the customer is actually shown/charged — no separate
+                    // discount math needed here.
                     'amount'          => $order->total_amount,
                     'method'          => $validated['method'],
                     'status'          => 'pending',
@@ -219,8 +249,8 @@ class PaymentController extends Controller
                 'data'   => $payment->load('order', 'user'),
             ], 201);
         } catch (\Throwable $th) {
-            // FIX: ប្រសិនបើ Payment::create() fail ក្រោយ file ត្រូវបាន upload រួច
-            // លុប file ចោលកុំឲ្យសល់ orphan ក្នុង storage
+            // FIX: if Payment::create() fails after a file was already
+            // uploaded, delete it so it doesn't linger as an orphan in storage.
             if ($receiptPath) {
                 Storage::disk('public')->delete($receiptPath);
             }
@@ -231,8 +261,10 @@ class PaymentController extends Controller
 
     /**
      * POST /api/payments/{payment}/check-status
-     * FIX: config('services.bakong.token') — key ដើមខុស ('api_token' → token តែងតែ null)
-     * FIX: role check រួមបញ្ចូល 'staff' ផងដែរ ស្របតាម middleware role:admin,staff កន្លែងផ្សេង
+     * FIX: config('services.bakong.token') — original key was wrong
+     * ('api_token' → token was always null)
+     * FIX: role check now also includes 'staff', consistent with the
+     * role:admin,staff middleware used elsewhere.
      */
     public function checkStatus(Payment $payment)
     {
@@ -257,7 +289,7 @@ class PaymentController extends Controller
         }
 
         try {
-            // ✅ FIX: 'services.bakong.token' — មិនមែន 'services.bakong.api_token' ទេ
+            // ✅ FIX: 'services.bakong.token' — not 'services.bakong.api_token'
             $bakong = new BakongKHQR(config('services.bakong.token'));
             $result = $bakong->checkTransactionByMD5($payment->transaction_ref);
 

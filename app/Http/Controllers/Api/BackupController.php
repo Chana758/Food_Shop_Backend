@@ -10,41 +10,53 @@ use Illuminate\Support\Facades\Log;
 
 class BackupController extends Controller
 {
+    private function resolveDisk(): array
+    {
+        $disks = config('backup.backup.destination.disks', []);
+        $diskName = $disks[0] ?? 'local'; 
+        $folderName = config('backup.backup.name', 'Laravel');
+
+        return [Storage::disk($diskName), $folderName];
+    }
+
     /**
-     * Display a listing of the backup files.
+     * GET /api/admin/backups
      */
     public function index()
     {
         try {
-            $diskName = config('backup.backup.destination.disks')[0] ?? 'local';
-            $disk = Storage::disk($diskName);
-            $folderName = config('backup.backup.name', 'Laravel');
-
+            [$disk, $folderName] = $this->resolveDisk();
             $files = $disk->files($folderName);
 
             $backups = [];
-            foreach ($files as $index => $file) {
+            foreach ($files as $file) {
                 if (str_ends_with($file, '.zip') || str_ends_with($file, '.sql')) {
                     $sizeBytes = $disk->size($file);
-                    $sizeFormatted = $sizeBytes > 1024 * 1024 
-                        ? round($sizeBytes / 1024 / 1024, 2) . ' MB' 
+                    $sizeFormatted = $sizeBytes > 1024 * 1024
+                        ? round($sizeBytes / 1024 / 1024, 2) . ' MB'
                         : round($sizeBytes / 1024, 2) . ' KB';
 
                     $backups[] = [
-                        'id' => $index + 1,
-                        'name' => basename($file),
-                        'size' => $sizeFormatted,
-                        'type' => str_contains($file, 'auto') ? 'Auto' : 'Manual',
+                        'name'   => basename($file),
+                        'size'   => $sizeFormatted,
+                        'type'   => str_contains($file, 'auto') ? 'Auto' : 'Manual',
                         'status' => 'Success',
-                        'date' => date('M d, Y — h:i A', $disk->lastModified($file)),
-                        'path' => $file,
+                        'date'   => date('M d, Y — h:i A', $disk->lastModified($file)),
+                        'path'   => $file,
                     ];
                 }
             }
 
+            $backups = array_reverse($backups);
+            // assign id AFTER reverse so it displays sequentially (1,2,3...)
+            foreach ($backups as $i => &$b) {
+                $b['id'] = $i + 1;
+            }
+            unset($b);
+
             return response()->json([
                 'status' => 'success',
-                'data' => array_reverse($backups)
+                'data'   => $backups,
             ], 200);
 
         } catch (\Exception $e) {
@@ -52,13 +64,13 @@ class BackupController extends Controller
 
             return response()->json([
                 'status' => 'error',
-                'message' => 'Failed to fetch backup history.'
+                'message' => 'Failed to fetch backup history.',
             ], 500);
         }
     }
 
     /**
-     * Run a new database backup immediately.
+     * POST /api/admin/backups
      */
     public function store(Request $request)
     {
@@ -67,7 +79,7 @@ class BackupController extends Controller
 
             return response()->json([
                 'status' => 'success',
-                'message' => 'Database backup generated successfully!'
+                'message' => 'Database backup generated successfully!',
             ], 200);
 
         } catch (\Exception $e) {
@@ -75,26 +87,23 @@ class BackupController extends Controller
 
             return response()->json([
                 'status' => 'error',
-                'message' => 'Backup failed: ' . $e->getMessage()
+                'message' => 'Backup failed: ' . $e->getMessage(),
             ], 500);
         }
     }
 
     /**
-     * Download a specific backup file.
+     * GET /api/admin/backups/{fileName}/download
      */
     public function download($fileName)
     {
-        $diskName = config('backup.backup.destination.disks')[0] ?? 'local';
-        $folderName = config('backup.backup.name', 'Laravel');
-        $filePath = $folderName . '/' . $fileName;
-
-        $disk = Storage::disk($diskName);
+        [$disk, $folderName] = $this->resolveDisk();
+        $filePath = $folderName . '/' . basename($fileName); // basename() guards path traversal
 
         if (!$disk->exists($filePath)) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Backup file not found.'
+                'message' => 'Backup file not found.',
             ], 404);
         }
 
@@ -102,34 +111,33 @@ class BackupController extends Controller
     }
 
     /**
-     * Delete a specific backup file.
+     * DELETE /api/admin/backups/{fileName}
      */
     public function destroy($fileName)
     {
         try {
-            $diskName = config('backup.backup.destination.disks')[0] ?? 'local';
-            $folderName = config('backup.backup.name', 'Laravel');
-            $filePath = $folderName . '/' . $fileName;
-
-            $disk = Storage::disk($diskName);
+            [$disk, $folderName] = $this->resolveDisk();
+            $filePath = $folderName . '/' . basename($fileName);
 
             if ($disk->exists($filePath)) {
                 $disk->delete($filePath);
                 return response()->json([
                     'status' => 'success',
-                    'message' => 'Backup deleted successfully.'
+                    'message' => 'Backup deleted successfully.',
                 ], 200);
             }
 
             return response()->json([
                 'status' => 'error',
-                'message' => 'File not found.'
+                'message' => 'File not found.',
             ], 404);
 
         } catch (\Exception $e) {
+            Log::error('Delete backup error: ' . $e->getMessage());
+
             return response()->json([
                 'status' => 'error',
-                'message' => 'Failed to delete backup.'
+                'message' => 'Failed to delete backup.',
             ], 500);
         }
     }
