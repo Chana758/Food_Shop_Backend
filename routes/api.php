@@ -21,6 +21,7 @@ use App\Http\Controllers\RiderController;
 use App\Http\Controllers\Api\Admin\ReportController;
 use App\Http\Controllers\API\BackupController;
 use App\Http\Controllers\Api\Admin\SettingController;
+use App\Http\Controllers\PricingController;
 
 // ======================================
 // PUBLIC
@@ -32,9 +33,8 @@ Route::get('/categories',    [CategoryController::class, 'index']);
 Route::get('/products',      [ProductController::class,  'index']);
 Route::get('/products/{id}', [ProductController::class,  'show']);
 Route::get('/tables',        [TableController::class,    'index']);
-
-// FIX: was '/contects' (typo — 'a' was missing). Corrected to '/contacts'.
-Route::post('/contacts', [ContactController::class, 'store']);
+Route::get('/pricing',       [PricingController::class,  'index']);
+Route::post('/contacts',     [ContactController::class,  'store']);
 
 // Public review listing — approved only, filterable by ?product_id=
 Route::get('/reviews', [ReviewController::class, 'index']);
@@ -42,7 +42,7 @@ Route::get('/reviews', [ReviewController::class, 'index']);
 // ======================================
 // PROTECTED — Authenticated users
 // ======================================
-Route::middleware(['auth:sanctum', 'check.blocked'])->group(function () {
+Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(function () {
 
     Route::get('/user',    fn(Request $r) => $r->user());
     Route::post('/logout', [AuthController::class, 'logout']);
@@ -53,15 +53,17 @@ Route::middleware(['auth:sanctum', 'check.blocked'])->group(function () {
     Route::post('/orders',                [OrderController::class, 'store']);
     Route::get('/orders/{order}',         [OrderController::class, 'show']);
     Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel']);
+    Route::post('/orders/khqr',           [OrderController::class, 'storeIfKhqrPaid']);
 
     // ── Payments ─────
     Route::post('/payments',                          [PaymentController::class, 'store']);
     Route::get('/payments',                           [PaymentController::class, 'myPayments']);
-    
-    // FIX: Changed GET to POST (has side-effect: updates DB + triggers events) 
-    // and added a rate limiter to prevent flooding/spamming external payment gateway APIs (e.g., Bakong).
+
+    // Own, tighter limiter for check-status specifically (Bakong API calls
+    // upstream — keep this separate and stricter, it stacks on top of the
+    // group-level 120/min above).
     Route::post('/payments/{payment}/check-status',    [PaymentController::class, 'checkStatus'])
-        ->middleware('throttle:20,1'); // Max 20 requests per minute per user
+        ->middleware('throttle:20,1');
 
     Route::post('/payments/{payment}/upload-receipt', [PaymentController::class, 'uploadReceipt']);
 
@@ -146,6 +148,17 @@ Route::middleware(['auth:sanctum', 'check.blocked'])->group(function () {
         // Reports — view statistics and analytics
         Route::get('/admin/reports/stats', [ReportController::class, 'stats']);
 
+        // ✅ CHANGED — Settings moved here from the admin-only group below.
+        // Global system configuration (incl. Appearance/theme accent color)
+        // is now shared: both admin and staff can view AND edit, so a
+        // staff account sees — and can set — the exact same live theme
+        // as admin instead of falling back to hardcoded defaults on a
+        // 403 from SettingsContext.jsx's fetchSettings().
+        Route::prefix('admin/settings')->group(function () {
+            Route::get('/', [SettingController::class, 'index']);
+            Route::put('/', [SettingController::class, 'update']);
+        });
+
     });
 
     // =========================
@@ -188,7 +201,8 @@ Route::middleware(['auth:sanctum', 'check.blocked'])->group(function () {
             Route::delete('/{order}',              [OrderController::class,     'destroy']);
             Route::post('/{order}/items',          [OrderItemController::class, 'store']);
             Route::put('/{order}/assign-rider',    [OrderController::class,     'assignRider']);
-            Route::put('/{order}/delivery-status', [OrderController::class,     'updateDeliveryStatus']);
+            // ✅ CHANGED: PUT -> POST for delivery-status to handle file uploads properly
+            Route::post('/{order}/delivery-status', [OrderController::class,     'updateDeliveryStatus']);
         });
 
         // Order Items
@@ -256,12 +270,6 @@ Route::middleware(['auth:sanctum', 'check.blocked'])->group(function () {
         // Notifications — admin sends manual notifications
         Route::prefix('admin/notifications')->group(function () {
             Route::post('/', [NotificationController::class, 'store']);
-        });
-
-        // Settings — global system configurations management
-        Route::prefix('admin/settings')->group(function () {
-            Route::get('/', [SettingController::class, 'index']);
-            Route::put('/', [SettingController::class, 'update']);
         });
 
         // Backups — database backup management

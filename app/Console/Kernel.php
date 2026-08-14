@@ -13,6 +13,9 @@ class Kernel extends ConsoleKernel
     protected function schedule(Schedule $schedule): void
     {
         // $schedule->command('inspire')->hourly();
+        $schedule->command('orders:expire-pending --minutes=3')
+        ->everyMinute()
+        ->withoutOverlapping();
     }
 
     /**

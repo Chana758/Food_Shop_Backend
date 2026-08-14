@@ -58,7 +58,7 @@ class RiderController extends Controller
             'name'         => 'sometimes|string|max:255',
             'phone'        => 'sometimes|string|max:20',
             'vehicle_type' => 'nullable|string|max:50',
-            // ✅ FIX: ប្រើ constant ជំនួស hardcode string — តែម្តងគេចថា middleware/validation ត្រូវគ្នាជានិច្ច
+            //  FIX: ប្រើ constant ជំនួស hardcode string — តែម្តងគេចថា middleware/validation ត្រូវគ្នាជានិច្ច
             'status'       => 'sometimes|in:' . implode(',', self::VALID_STATUSES),
         ]);
 

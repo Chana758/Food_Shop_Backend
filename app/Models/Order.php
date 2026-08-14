@@ -31,6 +31,7 @@ class Order extends Model
         'customer_phone',
         'delivery_address',
         'delivery_status',
+        'delivery_proof',
     ];
 
     // ── Relationships ──────────────────────────────────────

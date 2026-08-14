@@ -21,12 +21,12 @@ class DashboardController extends Controller
     // Low stock display limit
     private const LOW_STOCK_LIMIT = 5;
 
-    // Recent delivery orders limit (NEW)
+    // Recent delivery orders limit
     private const RECENT_DELIVERY_LIMIT = 5;
 
     /**
      * GET /api/admin/dashboard-stats
-     * 
+     *
      * Dashboard overview data — fetch on page load and automatically refresh when changes occur.
      */
     public function stats()
@@ -35,7 +35,7 @@ class DashboardController extends Controller
             $today     = Carbon::today();
             $yesterday = Carbon::yesterday();
 
-            // ═════════════════════════════                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    ═══════════════════════════════════
+            // ════════════════════════════════════════════════════════════════
             // 1. TODAY'S STATS  (the 4 stat cards at the top of the dashboard)
             // ════════════════════════════════════════════════════════════════
 
@@ -70,8 +70,10 @@ class DashboardController extends Controller
                 ->whereNull('deleted_at')
                 ->count();
 
-            // ── Pending Payments (for Alert Banner on dashboard) ──────────
-            $pendingPaymentsCount = Payment::where('status', 'pending')->count();
+            
+            $pendingPaymentsCount = Payment::where('status', 'pending')
+                ->where('method', '!=', 'cash')
+                ->count();
 
             // ════════════════════════════════════════════════════════════════
             // 2. SALES TREND — Last 7 Days  (Bar Chart)
@@ -110,8 +112,6 @@ class DashboardController extends Controller
             //    dine-in / takeaway orders)
             // ════════════════════════════════════════════════════════════════
 
-            // Single grouped query instead of 3 separate counts — better
-            // for performance.
             $queueCounts = Order::whereIn('status', ['pending', 'cooking', 'served'])
                 ->select('status', DB::raw('COUNT(*) as cnt'))
                 ->groupBy('status')
@@ -135,20 +135,20 @@ class DashboardController extends Controller
                 ->get()
                 ->map(fn($order) => [
                     'id'         => $order->id,
-                    // FIX: prefer customer_name (set on delivery orders)
-                    // before falling back to the logged-in user's name.
-                    // The original version only checked user->name, so a
-                    // guest checkout or delivery order with a different
-                    // contact name would silently show the account name
-                    // instead of who actually placed the order.
+                    // prefer customer_name (set on delivery orders) before
+                    // falling back to the logged-in user's name — a guest
+                    // checkout or delivery order with a different contact
+                    // name would otherwise silently show the account name.
                     'customer'   => $order->customer_name ?? $order->user?->name ?? 'Guest',
                     'status'     => $order->status,
-                    'order_type' => $order->order_type, // NEW: lets the UI flag delivery orders
+                    'order_type' => $order->order_type,
                     'total'      => round((float) $order->total_amount, 2),
                     'placed'     => $order->created_at?->format('H:i'),
                 ]);
 
+            // ════════════════════════════════════════════════════════════════
             // 5. LOW STOCK ITEMS  (list on the right side of the dashboard)
+            // ════════════════════════════════════════════════════════════════
 
             $lowStock = Product::where('stock_quantity', '<=', self::LOW_STOCK_THRESHOLD)
                 ->whereNull('deleted_at')
@@ -164,16 +164,8 @@ class DashboardController extends Controller
                     'critical' => $p->stock_quantity <= 2, // true = render in red
                 ]);
 
-            // 6. DELIVERY QUEUE  (NEW SECTION)
-            // ────────────────────────────────────────────────────────────────
-            // This is the piece that did not exist before. Without it, a
-            // customer choosing delivery created an order that was
-            // completely invisible from the dashboard — admin staff had
-            // to remember to manually navigate to /admin/delivery to even
-            // find out a delivery order existed. This block surfaces it
-            // exactly the same way pending payments are already
-            // surfaced: a count to drive a banner, plus a short list to
-            // act on directly from the dashboard.
+            // ════════════════════════════════════════════════════════════════
+            // 6. DELIVERY QUEUE
             // ════════════════════════════════════════════════════════════════
 
             $deliveryCounts = Order::where('order_type', 'delivery')
@@ -213,7 +205,9 @@ class DashboardController extends Controller
                     'placed'          => $order->created_at?->format('H:i'),
                 ]);
 
+            // ════════════════════════════════════════════════════════════════
             // RESPONSE
+            // ════════════════════════════════════════════════════════════════
 
             return response()->json([
                 'status' => 'success',
@@ -227,7 +221,7 @@ class DashboardController extends Controller
                     'new_customers_today'       => $newCustomersToday,
                     'low_stock_count'           => $lowStockCount,
                     'pending_payments_count'    => $pendingPaymentsCount,
-                    'unassigned_delivery_count' => $unassignedDeliveryCount, // NEW
+                    'unassigned_delivery_count' => $unassignedDeliveryCount,
                 ],
 
                 // Chart
@@ -236,12 +230,12 @@ class DashboardController extends Controller
                 // Live queue chips (kitchen)
                 'live_queue' => $liveQueue,
 
-                // Delivery queue chips (NEW)
+                // Delivery queue chips
                 'live_delivery_queue' => $deliveryQueue,
 
                 // Right column
                 'recent_orders'          => $recentOrders,
-                'recent_delivery_orders' => $recentDeliveryOrders, // NEW
+                'recent_delivery_orders' => $recentDeliveryOrders,
                 'low_stock'              => $lowStock,
 
                 // Meta
@@ -249,7 +243,6 @@ class DashboardController extends Controller
             ], 200);
 
         } catch (\Throwable $th) {
-            // Log the error for later debugging.
             \Log::error('DashboardController@stats error: ' . $th->getMessage(), [
                 'file' => $th->getFile(),
                 'line' => $th->getLine(),

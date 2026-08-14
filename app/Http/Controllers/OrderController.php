@@ -2,49 +2,29 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\OrderPaid;
 use App\Events\OrderStatusChanged;
 use App\Models\Order;
+use App\Models\Payment;
 use App\Models\Product;
 use App\Models\Rider;
 use App\Services\InventoryService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use KHQR\BakongKHQR;
 
 class OrderController extends Controller
 {
     /**
      * All statuses that are considered valid on the `orders` table.
-     * Used for general validation (e.g. filtering in index()).
      */
     private const VALID_STATUSES = [
-        'pending', 'cooking', 'served', 'paid', 'cancelled',
+        'pending', 'cooking', 'served', 'paid', 'refunded', 'cancelled',
     ];
 
     /**
-     * FIX: Statuses an admin is allowed to set directly through
-     * PUT /admin/orders/:id.
-     *
-     * ROOT CAUSE OF THE BUG: 'paid' used to be included in the statuses
-     * accepted by update(). That let an admin mark an order 'paid'
-     * directly from the Order Management screen WITHOUT ever creating
-     * or confirming a matching Payment record. Two systems of record
-     * (orders.status and payments.status) could then disagree — the
-     * order looked paid, but there was no Payment row to show it, no
-     * paid_at timestamp, no transaction_ref. That silently broke:
-     *   - PaymentController::stats()  (sums Payment.status = 'paid')
-     *   - OrderController::stats()    (sums Order.status = 'paid')
-     *     → these two revenue figures could diverge with no way to
-     *       reconcile which one was "correct".
-     *   - PaymentManagement.jsx admin screen, which would never show
-     *     this order as pending/paid because no Payment row exists.
-     *
-     * 'paid' must only ever be reached via PaymentController::confirm()
-     * or PaymentController::checkStatus() (Bakong-verified), which are
-     * the single source of truth for "money has actually moved". This
-     * endpoint keeps the kitchen/service workflow (pending → cooking →
-     * served) and cancellation, but payment confirmation is deliberately
-     * out of scope here.
+     * Statuses an admin is allowed to set directly through PUT /admin/orders/:id.
      */
     private const ADMIN_UPDATABLE_STATUSES = [
         'pending', 'cooking', 'served', 'cancelled',
@@ -58,14 +38,35 @@ class OrderController extends Controller
         'unassigned', 'assigned', 'picked_up', 'on_the_way', 'delivered', 'failed',
     ];
 
+    /**
+     * Order statuses for which stock has already left the building and must NOT be restored again.
+     */
+    private const STOCK_ALREADY_SETTLED_STATUSES = [
+        'paid', 'refunded', 'cancelled',
+    ];
+
     public function __construct(
         private readonly InventoryService $inventory
     ) {}
 
     /**
-     * Fire an OrderStatusChanged broadcast without ever letting a
-     * broadcast failure turn an already-successful DB write into an
-     * error response for the caller (e.g. Reverb not running).
+     * Reads delivery fee from config/pricing.php
+     */
+    private function deliveryFee(): float
+    {
+        return (float) config('pricing.delivery_fee', 1.00);
+    }
+
+    /**
+     * Reads free delivery threshold from config/pricing.php
+     */
+    private function freeDeliveryThreshold(): float
+    {
+        return (float) config('pricing.free_delivery_threshold', 20.00);
+    }
+
+    /**
+     * Safe broadcast wrapper for OrderStatusChanged event.
      */
     private function safeBroadcast(Order $order, string $newStatus): void
     {
@@ -77,23 +78,7 @@ class OrderController extends Controller
     }
 
     /**
-     * ✅ NEW — shared helper for computing an item's effective unit price.
-     *
-     * ROOT CAUSE OF THE BUG THIS FIXES: the old code used
-     * `$product->discount_price ?? $product->price`. PHP's `??` only
-     * falls back when the left side is NULL — but legacy/bad data had
-     * stored `discount_price = "0.00"` (a non-null zero) for products
-     * with no real discount. Since 0.00 is not null, `??` treated it as
-     * "the real discount price" and priced the item at $0.00 instead of
-     * falling back to `price`. That silently zeroed out order totals
-     * (see Order #40 in production: total_amount ended up $0.00).
-     *
-     * This mirrors the exact same "is there a valid discount" rule the
-     * frontend already uses in priceUtils.js (`hasDiscount()`): a
-     * discount only counts if it's > 0, strictly less than the original
-     * price, AND (if an expiry is set) not yet expired. Keeping this
-     * logic in one place means the backend and frontend can never
-     * disagree about whether a product is "on sale" right now.
+     * Calculate unit price considering valid discount conditions.
      */
     private function effectiveUnitPrice(Product $product): float
     {
@@ -108,13 +93,22 @@ class OrderController extends Controller
         return $hasValidDiscount ? (float) $discount : $price;
     }
 
+    /**
+     * Void any pending Payment associated with an order.
+     */
+    private function voidPendingPayments(Order $order): void
+    {
+        Payment::where('order_id', $order->id)
+            ->where('status', 'pending')
+            ->update(['status' => 'rejected']);
+    }
+
     // ──────────────────────────────────────────────
     //  ADMIN ENDPOINTS
     // ──────────────────────────────────────────────
 
     /**
      * GET /api/admin/orders
-     * List all orders with optional filters (admin only).
      */
     public function index(Request $request)
     {
@@ -125,8 +119,8 @@ class OrderController extends Controller
                 ->when($request->delivery_status, fn($q) => $q->where('delivery_status', $request->delivery_status))
                 ->when($request->rider_id,        fn($q) => $q->where('rider_id',        $request->rider_id))
                 ->when($request->user_id,         fn($q) => $q->where('user_id',         $request->user_id))
-                ->when($request->date_from, fn($q) => $q->whereDate('created_at', '>=', $request->date_from))
-                ->when($request->date_to,   fn($q) => $q->whereDate('created_at', '<=', $request->date_to))
+                ->when($request->date_from,       fn($q) => $q->whereDate('created_at', '>=', $request->date_from))
+                ->when($request->date_to,         fn($q) => $q->whereDate('created_at', '<=', $request->date_to))
                 ->latest()
                 ->paginate($request->per_page ?? 15);
 
@@ -146,7 +140,6 @@ class OrderController extends Controller
 
     /**
      * GET /api/orders/:id
-     * Show single order — admin sees all, customer sees own only.
      */
     public function show(Order $order)
     {
@@ -167,16 +160,11 @@ class OrderController extends Controller
 
     /**
      * PUT /api/admin/orders/:id
-     * Admin updates order status (kitchen/service workflow only —
-     * NOT payment confirmation, see ADMIN_UPDATABLE_STATUSES above),
-     * table, or notes.
      */
     public function update(Request $request, Order $order)
     {
         try {
             $validated = $request->validate([
-                //  FIX: restricted to ADMIN_UPDATABLE_STATUSES instead
-                // of VALID_STATUSES — 'paid' is no longer settable here.
                 'status'   => 'sometimes|in:' . implode(',', self::ADMIN_UPDATABLE_STATUSES),
                 'table_id' => 'nullable|exists:tables,id',
                 'notes'    => 'nullable|string',
@@ -187,9 +175,8 @@ class OrderController extends Controller
                     ($validated['status'] ?? null) === 'cancelled' &&
                     $order->status !== 'cancelled'
                 ) {
-                    // ✅ FIX: centralized via InventoryService instead of
-                    // a local foreach + increment() copy-pasted here.
                     $this->inventory->restoreStock($order);
+                    $this->voidPendingPayments($order);
                 }
                 $order->update($validated);
             });
@@ -223,14 +210,12 @@ class OrderController extends Controller
 
     /**
      * DELETE /api/admin/orders/:id
-     * Hard-delete; restores stock unless already paid/cancelled.
      */
     public function destroy(Order $order)
     {
         try {
             DB::transaction(function () use ($order) {
-                if (! in_array($order->status, ['paid', 'cancelled'])) {
-                    // ✅ FIX: centralized via InventoryService.
+                if (! in_array($order->status, self::STOCK_ALREADY_SETTLED_STATUSES)) {
                     $this->inventory->restoreStock($order);
                 }
                 $order->delete();
@@ -252,7 +237,6 @@ class OrderController extends Controller
 
     /**
      * PUT /api/admin/orders/{order}/assign-rider
-     * Assign a rider to a delivery order.
      */
     public function assignRider(Request $request, Order $order)
     {
@@ -308,13 +292,22 @@ class OrderController extends Controller
     }
 
     /**
-     * PUT /api/admin/orders/{order}/delivery-status
-     * Update delivery progress; releases rider when done.
+     * POST /api/admin/orders/{order}/delivery-status
+     *
+     * ✅ CHANGED FROM PUT → POST: file uploads need multipart/form-data,
+     * which browsers/axios can't reliably send over a raw PUT request.
+     *
+     * ✅ NEW: requires a `delivery_proof` photo before the status can be set
+     * to 'delivered' — closes the trust gap where a status change was pure
+     * staff self-report with no independent evidence the goods actually
+     * arrived. A photo already on file (from a prior attempt) satisfies the
+     * requirement without needing to re-upload.
      */
     public function updateDeliveryStatus(Request $request, Order $order)
     {
         $validated = $request->validate([
             'delivery_status' => 'required|in:' . implode(',', self::VALID_DELIVERY_STATUSES),
+            'delivery_proof'  => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
         ]);
 
         if ($order->order_type !== 'delivery') {
@@ -324,9 +317,30 @@ class OrderController extends Controller
             ], 422);
         }
 
+        // ✅ NEW: the actual guard — 'delivered' is refused outright without
+        // photo evidence, either newly uploaded here or already on the order.
+        if (
+            $validated['delivery_status'] === 'delivered'
+            && ! $order->delivery_proof
+            && ! $request->hasFile('delivery_proof')
+        ) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'A delivery photo is required before marking as delivered.',
+            ], 422);
+        }
+
         try {
-            DB::transaction(function () use ($order, $validated) {
-                $order->update(['delivery_status' => $validated['delivery_status']]);
+            $proofPath = null;
+
+            DB::transaction(function () use ($order, $validated, $request, &$proofPath) {
+                if ($request->hasFile('delivery_proof')) {
+                    $proofPath = $request->file('delivery_proof')->store('deliveries/proofs', 'public');
+                    $order->delivery_proof = $proofPath;
+                }
+
+                $order->delivery_status = $validated['delivery_status'];
+                $order->save();
 
                 if (
                     in_array($validated['delivery_status'], ['delivered', 'failed']) &&
@@ -361,27 +375,7 @@ class OrderController extends Controller
 
     /**
      * POST /api/orders
-     * Customer / POS places a dine-in / takeaway / delivery order.
-     *
-     * FIX #1 (discount_amount): added optional POS staff discount.
-     * Previously the POS screen (ManagementSaler.jsx) let staff apply a
-     * manual $ or % discount and showed the discounted "grandTotal" in
-     * the cart, on the printed receipt, and even fed it as the `amount`
-     * shown on the generated KHQR QR code — but never sent that discount
-     * to this endpoint. This endpoint always computed total_amount purely
-     * from item price × quantity, so `orders.total_amount` (and, in turn,
-     * `payments.amount`, since PaymentController::store() copies
-     * order.total_amount) silently ended up LARGER than what the
-     * customer actually saw and paid.
-     *
-     * FIX #2 (unit price lookup): see effectiveUnitPrice() above —
-     * `discount_price ?? price` broke on legacy rows where
-     * discount_price was stored as 0.00 instead of null, zeroing out
-     * the item's price (and therefore the whole order total).
-     *
-     * The discount is validated and clamped server-side (never trusts
-     * the client's pre-computed grand total) so a tampered/stale client
-     * value can't under- or over-charge what's stored.
+     * Standard order creation (Cash / COD / Takeaway / Dine-in).
      */
     public function store(Request $request)
     {
@@ -392,7 +386,7 @@ class OrderController extends Controller
             'customer_name'      => 'required_if:order_type,delivery|nullable|string|max:255',
             'customer_phone'     => 'required_if:order_type,delivery|nullable|string|max:20',
             'delivery_address'   => 'required_if:order_type,delivery|nullable|string',
-            'discount_amount'    => 'nullable|numeric|min:0', // ✅ POS staff discount
+            'discount_amount'    => 'nullable|numeric|min:0',
             'items'              => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity'   => 'required|integer|min:1',
@@ -422,8 +416,6 @@ class OrderController extends Controller
                         throw new \Exception("Insufficient stock for: {$product->name}.");
                     }
 
-                    // ✅ FIX: was `$product->discount_price ?? $product->price`
-                    // — see effectiveUnitPrice() docblock for why that broke.
                     $price        = $this->effectiveUnitPrice($product);
                     $lineSubtotal = $price * $item['quantity'];
                     $totalAmount += $lineSubtotal;
@@ -439,22 +431,26 @@ class OrderController extends Controller
                     $product->decrement('stock_quantity', $item['quantity']);
                 }
 
-                // ✅ never trust the client-supplied discount blindly —
-                // clamp it to [0, subtotal] so total_amount can't go negative
-                // or exceed the real subtotal even if the frontend sends a
-                // stale/tampered value.
                 $discountAmount = min(
                     max((float) ($validated['discount_amount'] ?? 0), 0),
                     $totalAmount
                 );
+
+                $deliveryFee = ($validated['order_type'] === 'delivery'
+                    && $totalAmount > 0
+                    && $totalAmount < $this->freeDeliveryThreshold())
+                    ? $this->deliveryFee()
+                    : 0;
+
+                $finalTotal = round($totalAmount - $discountAmount + $deliveryFee, 2);
 
                 $order = Order::create([
                     'user_id'          => auth()->id(),
                     'table_id'         => $validated['table_id'] ?? null,
                     'order_type'       => $validated['order_type'],
                     'status'           => 'pending',
-                    'total_amount'     => $totalAmount - $discountAmount, // ✅ discounted total — matches what's shown/paid
-                    'discount_amount'  => $discountAmount,                // ✅ kept for reporting/receipts
+                    'total_amount'     => $finalTotal,
+                    'discount_amount'  => $discountAmount,
                     'notes'            => $validated['notes'] ?? null,
                     'customer_name'    => $validated['customer_name']    ?? null,
                     'customer_phone'   => $validated['customer_phone']   ?? null,
@@ -491,8 +487,147 @@ class OrderController extends Controller
     }
 
     /**
+     * POST /api/orders/khqr
+     * Atomic KHQR Payment Verification & Order Placement.
+     */
+    public function storeIfKhqrPaid(Request $request)
+    {
+        $validated = $request->validate([
+            'order_type'         => 'required|in:' . implode(',', self::VALID_ORDER_TYPES),
+            'notes'              => 'nullable|string',
+            'customer_name'      => 'required_if:order_type,delivery|nullable|string|max:255',
+            'customer_phone'     => 'required_if:order_type,delivery|nullable|string|max:20',
+            'delivery_address'   => 'required_if:order_type,delivery|nullable|string',
+            'items'              => 'required|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.quantity'   => 'required|integer|min:1',
+            'transaction_ref'    => 'required|string',
+        ]);
+
+        try {
+            // 1. Idempotency Guard
+            $existing = Payment::where('transaction_ref', $validated['transaction_ref'])
+                ->where('status', 'paid')
+                ->first();
+
+            if ($existing) {
+                return response()->json([
+                    'status' => 'success',
+                    'paid'   => true,
+                    'data'   => $existing->order->load('items.product', 'table', 'user', 'rider'),
+                ], 200);
+            }
+
+            // 2. Server-side Amount Calculation
+            $totalAmount = 0;
+            foreach ($validated['items'] as $item) {
+                $product = Product::find($item['product_id']);
+                if (! $product) {
+                    return response()->json([
+                        'status'  => 'error',
+                        'message' => "Product #{$item['product_id']} not found.",
+                    ], 422);
+                }
+                $totalAmount += $this->effectiveUnitPrice($product) * $item['quantity'];
+            }
+
+            $deliveryFee = ($validated['order_type'] === 'delivery'
+                && $totalAmount > 0
+                && $totalAmount < $this->freeDeliveryThreshold())
+                ? $this->deliveryFee()
+                : 0;
+
+            $finalTotal = round($totalAmount + $deliveryFee, 2);
+
+            // 3. Verify with Bakong KHQR Open API
+            $bakong = new BakongKHQR(config('services.bakong.token'));
+            $result = $bakong->checkTransactionByMD5($validated['transaction_ref']);
+
+            $responseCode    = $result->responseCode ?? ($result->status->code ?? null);
+            $transactionData = $result->data ?? null;
+
+            $amountMatches = $transactionData
+                && isset($transactionData->amount)
+                && abs((float) $transactionData->amount - $finalTotal) < 0.01;
+
+            if ($responseCode !== 0 || ! $transactionData || ! $amountMatches) {
+                return response()->json(['status' => 'success', 'paid' => false], 200);
+            }
+
+            // 4. Create Order & Payment atomically upon payment confirmation
+            $order = DB::transaction(function () use ($validated, $finalTotal) {
+                $itemsData = [];
+
+                foreach ($validated['items'] as $item) {
+                    $product = Product::lockForUpdate()->find($item['product_id']);
+
+                    if ($product->stock_quantity < $item['quantity']) {
+                        throw new \Exception("Insufficient stock for: {$product->name}.");
+                    }
+
+                    $price       = $this->effectiveUnitPrice($product);
+                    $itemsData[] = [
+                        'product_id' => $product->id,
+                        'price'      => $price,
+                        'quantity'   => $item['quantity'],
+                        'subtotal'   => $price * $item['quantity'],
+                    ];
+
+                    $product->decrement('stock_quantity', $item['quantity']);
+                }
+
+                $order = Order::create([
+                    'user_id'          => auth()->id(),
+                    'order_type'       => $validated['order_type'],
+                    'status'           => 'paid',
+                    'total_amount'     => $finalTotal,
+                    'discount_amount'  => 0,
+                    'notes'            => $validated['notes'] ?? null,
+                    'customer_name'    => $validated['customer_name']    ?? null,
+                    'customer_phone'   => $validated['customer_phone']   ?? null,
+                    'delivery_address' => $validated['delivery_address'] ?? null,
+                    'delivery_status'  => $validated['order_type'] === 'delivery' ? 'unassigned' : null,
+                ]);
+
+                foreach ($itemsData as $data) {
+                    $order->items()->create($data);
+                }
+
+                Payment::create([
+                    'order_id'        => $order->id,
+                    'user_id'         => auth()->id(),
+                    'amount'          => $finalTotal,
+                    'method'          => 'khqr',
+                    'status'          => 'paid',
+                    'transaction_ref' => $validated['transaction_ref'],
+                    'paid_at'         => now(),
+                ]);
+
+                return $order;
+            });
+
+            DB::afterCommit(function () use ($order) {
+                try {
+                    event(new OrderPaid($order->fresh('items.product', 'table', 'user', 'rider')));
+                } catch (\Throwable $th) {
+                    Log::warning("storeIfKhqrPaid: broadcast failed #{$order->id} — {$th->getMessage()}");
+                }
+            });
+
+            return response()->json([
+                'status' => 'success',
+                'paid'   => true,
+                'data'   => $order->load('items.product', 'table', 'user', 'rider'),
+            ], 201);
+
+        } catch (\Throwable $th) {
+            Log::error('OrderController@storeIfKhqrPaid: ' . $th->getMessage());
+            return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500);
+        }
+    }
+
+    /**
      * GET /api/orders
-     * Customer views their own order history (ownership-filtered).
      */
     public function myOrders(Request $request)
     {
@@ -520,14 +655,6 @@ class OrderController extends Controller
 
     /**
      * POST /api/orders/{order}/cancel
-     * Customer cancels their own pending order; restores stock.
-     *
-     * NOTE: this is also called by the POS screen (ManagementSaler.jsx)
-     * when staff abandon a KHQR scan mid-flow, and by Checkout.jsx when
-     * a customer's KHQR QR expires or they navigate away — so ownership
-     * here effectively covers both "customer cancels their own order"
-     * and "staff cancels the order they just placed at the counter"
-     * (POS orders are created with auth()->id() = the staff member).
      */
     public function cancel(Order $order)
     {
@@ -547,9 +674,9 @@ class OrderController extends Controller
 
         try {
             DB::transaction(function () use ($order) {
-                // FIX: centralized via InventoryService.
                 $this->inventory->restoreStock($order);
                 $order->update(['status' => 'cancelled']);
+                $this->voidPendingPayments($order);
             });
 
             DB::afterCommit(function () use ($order) {
@@ -573,11 +700,12 @@ class OrderController extends Controller
 
     /**
      * GET /api/admin/orders/stats
-     * Aggregate stats for admin dashboard.
      */
     public function stats()
     {
         try {
+            $today = \Carbon\Carbon::today('Asia/Phnom_Penh');
+
             $stats = [
                 'by_status' => Order::selectRaw('status, COUNT(*) as count')
                     ->groupBy('status')->get(),
@@ -590,8 +718,8 @@ class OrderController extends Controller
                     ->groupBy('delivery_status')->get(),
 
                 'today' => [
-                    'orders'  => Order::whereDate('created_at', today())->count(),
-                    'revenue' => Order::whereDate('created_at', today())
+                    'orders'  => Order::whereDate('created_at', $today)->count(),
+                    'revenue' => Order::whereDate('created_at', $today)
                         ->where('status', 'paid')->sum('total_amount'),
                 ],
 
