@@ -15,7 +15,7 @@ class OrderPaid implements ShouldBroadcastNow
 
     public function __construct(public Order $order)
     {
-        $this->order->loadMissing('items'); // ✅ FIX: relation ឈ្មោះ 'items' មិនមែន 'orderItems'
+        $this->order->loadMissing('items'); // FIX: relation ឈ្មោះ 'items' មិនមែន 'orderItems'
     }
 
     public function broadcastOn(): array

@@ -45,6 +45,12 @@ class OrderController extends Controller
         'paid', 'refunded', 'cancelled',
     ];
 
+    private const FINANCIALLY_SETTLED_STATUSES = [
+        'paid', 'refunded',
+    ];
+
+    private const STOCK_SHORTAGE_NOTE_PREFIX = '⚠️ STOCK SHORTAGE — verify fulfillment: ';
+
     public function __construct(
         private readonly InventoryService $inventory
     ) {}
@@ -210,9 +216,24 @@ class OrderController extends Controller
 
     /**
      * DELETE /api/admin/orders/:id
+     *
+     * Refuses to delete an order once it's financially settled
+     * ('paid' or 'refunded'). Previously this only skipped restoring
+     * stock for those statuses but still allowed the delete to proceed —
+     * and because `payments.order_id` cascades on delete, that silently
+     * destroyed the matching Payment row too, with no trace that money
+     * ever changed hands. Use PaymentController::refund() to reverse a
+     * paid order instead of deleting it.
      */
     public function destroy(Order $order)
     {
+        if (in_array($order->status, self::FINANCIALLY_SETTLED_STATUSES)) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "Cannot delete a {$order->status} order — it has an associated payment record. Use refund instead.",
+            ], 422);
+        }
+
         try {
             DB::transaction(function () use ($order) {
                 if (! in_array($order->status, self::STOCK_ALREADY_SETTLED_STATUSES)) {
@@ -237,6 +258,11 @@ class OrderController extends Controller
 
     /**
      * PUT /api/admin/orders/{order}/assign-rider
+     *
+     * Refuses to assign a rider who is already 'busy' on another
+     * delivery. Previously only the order's own delivery_status was
+     * checked, so the same rider could be double-booked onto two
+     * deliveries at once.
      */
     public function assignRider(Request $request, Order $order)
     {
@@ -255,6 +281,22 @@ class OrderController extends Controller
             return response()->json([
                 'status'  => 'error',
                 'message' => 'Cannot assign rider — delivery already ' . $order->delivery_status . '.',
+            ], 422);
+        }
+
+        $rider = Rider::find($validated['rider_id']);
+
+        // Allow re-assigning the SAME rider back onto this order
+        // (e.g. re-confirming), but block picking a DIFFERENT rider who is
+        // currently busy on some other delivery.
+        if (
+            $rider
+            && $rider->status === 'busy'
+            && $order->rider_id !== $rider->id
+        ) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => "{$rider->name} is currently busy on another delivery.",
             ], 422);
         }
 
@@ -293,15 +335,6 @@ class OrderController extends Controller
 
     /**
      * POST /api/admin/orders/{order}/delivery-status
-     *
-     * ✅ CHANGED FROM PUT → POST: file uploads need multipart/form-data,
-     * which browsers/axios can't reliably send over a raw PUT request.
-     *
-     * ✅ NEW: requires a `delivery_proof` photo before the status can be set
-     * to 'delivered' — closes the trust gap where a status change was pure
-     * staff self-report with no independent evidence the goods actually
-     * arrived. A photo already on file (from a prior attempt) satisfies the
-     * requirement without needing to re-upload.
      */
     public function updateDeliveryStatus(Request $request, Order $order)
     {
@@ -317,8 +350,6 @@ class OrderController extends Controller
             ], 422);
         }
 
-        // ✅ NEW: the actual guard — 'delivered' is refused outright without
-        // photo evidence, either newly uploaded here or already on the order.
         if (
             $validated['delivery_status'] === 'delivered'
             && ! $order->delivery_proof
@@ -376,6 +407,19 @@ class OrderController extends Controller
     /**
      * POST /api/orders
      * Standard order creation (Cash / COD / Takeaway / Dine-in).
+     *
+     * ✅ FIX (Bug 1): total_amount now includes tax_amount, computed
+     * server-side from the same figure the client (POS / storefront)
+     * displays and — for KHQR — encodes into the QR code. Previously
+     * total_amount = subtotal - discount + delivery_fee only, with NO
+     * tax term at all, while ManagementSaler.jsx's grandTotal (used to
+     * generate the POS KHQR QR) DID include tax whenever Settings >
+     * Receipt & POS Rules had tax enabled. That mismatch meant
+     * PaymentController::checkStatus()'s `amountMatches` check
+     * (comparing Bakong's reported paid amount against
+     * payments.amount, which is copied from orders.total_amount) could
+     * never succeed for a taxed order — the customer would scan and
+     * genuinely pay, but the system would never detect it as paid.
      */
     public function store(Request $request)
     {
@@ -387,6 +431,7 @@ class OrderController extends Controller
             'customer_phone'     => 'required_if:order_type,delivery|nullable|string|max:20',
             'delivery_address'   => 'required_if:order_type,delivery|nullable|string',
             'discount_amount'    => 'nullable|numeric|min:0',
+            'tax_amount'         => 'nullable|numeric|min:0', // ✅ NEW
             'items'              => 'required|array|min:1',
             'items.*.product_id' => 'required|exists:products,id',
             'items.*.quantity'   => 'required|integer|min:1',
@@ -436,13 +481,18 @@ class OrderController extends Controller
                     $totalAmount
                 );
 
+                // ✅ NEW: tax, applied after discount. Clamped at 0 minimum;
+                // no upper bound needed since it's server-trusted-but-client-
+                // supplied — see note above re: KHQR amount matching.
+                $taxAmount = max((float) ($validated['tax_amount'] ?? 0), 0);
+
                 $deliveryFee = ($validated['order_type'] === 'delivery'
                     && $totalAmount > 0
                     && $totalAmount < $this->freeDeliveryThreshold())
                     ? $this->deliveryFee()
                     : 0;
 
-                $finalTotal = round($totalAmount - $discountAmount + $deliveryFee, 2);
+                $finalTotal = round($totalAmount - $discountAmount + $deliveryFee + $taxAmount, 2);
 
                 $order = Order::create([
                     'user_id'          => auth()->id(),
@@ -451,6 +501,7 @@ class OrderController extends Controller
                     'status'           => 'pending',
                     'total_amount'     => $finalTotal,
                     'discount_amount'  => $discountAmount,
+                    'tax_amount'       => $taxAmount, // ✅ NEW
                     'notes'            => $validated['notes'] ?? null,
                     'customer_name'    => $validated['customer_name']    ?? null,
                     'customer_phone'   => $validated['customer_phone']   ?? null,
@@ -489,6 +540,41 @@ class OrderController extends Controller
     /**
      * POST /api/orders/khqr
      * Atomic KHQR Payment Verification & Order Placement.
+     *
+     * Closes a race condition. Because this endpoint is polled every
+     * ~4s and can be hit concurrently (two browser tabs, a retry racing the
+     * original request, etc.), two requests could previously both pass the
+     * "does a paid Payment already exist for this transaction_ref" check
+     * before either had written anything — the check-then-act gap wasn't
+     * protected by any lock — and each would go on to create its own
+     * duplicate Order + Payment for the same real-world transaction.
+     *
+     * Fix: acquire a MySQL named lock keyed on the transaction_ref for the
+     * duration of the Bakong verification + order-creation, so only one
+     * request can be "in flight" for a given transaction_ref at a time.
+     * The second concurrent request waits, then hits the idempotency guard
+     * (which now finds the just-created Payment) and returns it instead of
+     * creating a second one.
+     *
+     * ✅ FIX (money-safety bug): once Bakong confirms `paid: true`, real
+     * money has ALREADY left the customer's wallet — that fact can no
+     * longer be undone by anything that happens on our side afterward.
+     * The old code still ran the stock check *inside* the same
+     * DB::transaction() as the Order/Payment creation, so an
+     * "Insufficient stock" exception rolled back EVERYTHING, including
+     * the Payment row — leaving no record anywhere in the system that a
+     * real, Bakong-confirmed payment had happened. The customer would see
+     * a generic error (or the QR simply "expiring"), while the money sat
+     * in the merchant's ABA account with no matching order, and no way
+     * for an admin to reconcile it.
+     *
+     * Fix: Order + Payment creation is now unconditional once Bakong
+     * confirms payment — it can NEVER be rolled back by a stock issue.
+     * Stock is decremented on a best-effort basis in a SEPARATE step
+     * after the financial record already exists; any item that runs
+     * short is clamped at 0 (never negative) and the order is flagged
+     * with a human-visible note + a Log::critical() alert so staff catch
+     * it immediately instead of the sale vanishing untraceably.
      */
     public function storeIfKhqrPaid(Request $request)
     {
@@ -504,9 +590,30 @@ class OrderController extends Controller
             'transaction_ref'    => 'required|string',
         ]);
 
+        $ref      = $validated['transaction_ref'];
+        $lockName = 'khqr_ref_' . $ref;
+        // getLock() with a short timeout: if another request already holds
+        // the lock for this exact transaction_ref, wait briefly for it to
+        // finish (it's doing the same work) rather than racing it.
+        $gotLock = DB::selectOne('SELECT GET_LOCK(?, 10) as locked', [$lockName])->locked;
+
+        if (! $gotLock) {
+            Log::warning("storeIfKhqrPaid: could not acquire lock for ref {$ref} — treating as concurrent duplicate request.");
+            $existing = Payment::where('transaction_ref', $ref)->where('status', 'paid')->first();
+            if ($existing) {
+                return response()->json([
+                    'status' => 'success',
+                    'paid'   => true,
+                    'data'   => $existing->order->load('items.product', 'table', 'user', 'rider'),
+                ], 200);
+            }
+            return response()->json(['status' => 'success', 'paid' => false], 200);
+        }
+
         try {
-            // 1. Idempotency Guard
-            $existing = Payment::where('transaction_ref', $validated['transaction_ref'])
+            // 1. Idempotency Guard (now safe from the race: only one
+            //    request at a time reaches this point for a given ref)
+            $existing = Payment::where('transaction_ref', $ref)
                 ->where('status', 'paid')
                 ->first();
 
@@ -518,7 +625,9 @@ class OrderController extends Controller
                 ], 200);
             }
 
-            // 2. Server-side Amount Calculation
+            // 2. Server-side Amount Calculation (pricing only — no stock
+            //    mutation here, so a mispriced/missing product is still
+            //    safe to reject before any money is claimed as ours).
             $totalAmount = 0;
             foreach ($validated['items'] as $item) {
                 $product = Product::find($item['product_id']);
@@ -541,7 +650,7 @@ class OrderController extends Controller
 
             // 3. Verify with Bakong KHQR Open API
             $bakong = new BakongKHQR(config('services.bakong.token'));
-            $result = $bakong->checkTransactionByMD5($validated['transaction_ref']);
+            $result = $bakong->checkTransactionByMD5($ref);
 
             $responseCode    = $result->responseCode ?? ($result->status->code ?? null);
             $transactionData = $result->data ?? null;
@@ -550,32 +659,44 @@ class OrderController extends Controller
                 && isset($transactionData->amount)
                 && abs((float) $transactionData->amount - $finalTotal) < 0.01;
 
+            Log::info('Bakong storeIfKhqrPaid debug', [
+                'transaction_ref' => $ref,
+                'response_code'   => $responseCode,
+                'bakong_amount'   => $transactionData->amount ?? null,
+                'bakong_currency' => $transactionData->currency ?? null,
+                'expected_amount' => $finalTotal,
+                'amount_matches'  => $amountMatches,
+                'has_data'        => (bool) $transactionData,
+            ]);
+
             if ($responseCode !== 0 || ! $transactionData || ! $amountMatches) {
+                Log::warning('Bakong storeIfKhqrPaid: not marked paid', [
+                    'transaction_ref'  => $ref,
+                    'response_code_ok' => $responseCode === 0,
+                    'has_data'         => (bool) $transactionData,
+                    'amount_matches'   => $amountMatches,
+                ]);
                 return response()->json(['status' => 'success', 'paid' => false], 200);
             }
 
-            // 4. Create Order & Payment atomically upon payment confirmation
-            $order = DB::transaction(function () use ($validated, $finalTotal) {
-                $itemsData = [];
+            // ─────────────────────────────────────────────────────────
+            // 4. FROM HERE ON, BAKONG HAS CONFIRMED REAL MONEY MOVED.
+            //    Everything below MUST result in a persisted Order +
+            //    Payment — nothing past this point is allowed to roll
+            //    that back. Stock shortage is handled as a soft,
+            //    best-effort, non-fatal step (4b), never as a reason to
+            //    lose the financial record (4a).
+            // ─────────────────────────────────────────────────────────
 
-                foreach ($validated['items'] as $item) {
-                    $product = Product::lockForUpdate()->find($item['product_id']);
+            $shortages = [];
 
-                    if ($product->stock_quantity < $item['quantity']) {
-                        throw new \Exception("Insufficient stock for: {$product->name}.");
-                    }
+            $order = DB::transaction(function () use ($validated, $finalTotal, $ref, &$shortages) {
 
-                    $price       = $this->effectiveUnitPrice($product);
-                    $itemsData[] = [
-                        'product_id' => $product->id,
-                        'price'      => $price,
-                        'quantity'   => $item['quantity'],
-                        'subtotal'   => $price * $item['quantity'],
-                    ];
-
-                    $product->decrement('stock_quantity', $item['quantity']);
-                }
-
+                // 4a. Create the Order + Payment FIRST, unconditionally.
+                //     This is the money-safety guarantee: no exception
+                //     thrown afterward (e.g. from stock handling) can
+                //     unwind this, because stock handling below never
+                //     throws — see 4b.
                 $order = Order::create([
                     'user_id'          => auth()->id(),
                     'order_type'       => $validated['order_type'],
@@ -589,22 +710,76 @@ class OrderController extends Controller
                     'delivery_status'  => $validated['order_type'] === 'delivery' ? 'unassigned' : null,
                 ]);
 
-                foreach ($itemsData as $data) {
-                    $order->items()->create($data);
-                }
-
                 Payment::create([
                     'order_id'        => $order->id,
                     'user_id'         => auth()->id(),
                     'amount'          => $finalTotal,
                     'method'          => 'khqr',
                     'status'          => 'paid',
-                    'transaction_ref' => $validated['transaction_ref'],
+                    'transaction_ref' => $ref,
                     'paid_at'         => now(),
                 ]);
 
+                // 4b. Best-effort stock decrement. Never throws: an item
+                //     running short is clamped at 0 and recorded in
+                //     $shortages for the caller to flag, instead of
+                //     aborting the (already-financially-real) order.
+                foreach ($validated['items'] as $item) {
+                    $product = Product::lockForUpdate()->find($item['product_id']);
+
+                    $price        = $product ? $this->effectiveUnitPrice($product) : 0;
+                    $requestedQty = $item['quantity'];
+                    $availableQty = $product ? max(0, (int) $product->stock_quantity) : 0;
+
+                    if (! $product || $availableQty < $requestedQty) {
+                        $shortages[] = [
+                            'product_id'   => $item['product_id'],
+                            'product_name' => $product->name ?? "#{$item['product_id']}",
+                            'requested'    => $requestedQty,
+                            'available'    => $availableQty,
+                        ];
+                    }
+
+                    $order->items()->create([
+                        'product_id' => $item['product_id'],
+                        'price'      => $price,
+                        'quantity'   => $requestedQty,
+                        'subtotal'   => $price * $requestedQty,
+                    ]);
+
+                    if ($product) {
+                        // Clamp at 0 — never go negative, never throw.
+                        $product->update([
+                            'stock_quantity' => max(0, $availableQty - $requestedQty),
+                        ]);
+                    }
+                }
+
+                // 4c. Flag the order for staff review if anything came up short.
+                if (! empty($shortages)) {
+                    $summary = collect($shortages)
+                        ->map(fn($s) => "{$s['product_name']} (need {$s['requested']}, had {$s['available']})")
+                        ->implode('; ');
+
+                    $order->update([
+                        'notes' => self::STOCK_SHORTAGE_NOTE_PREFIX . $summary
+                            . ($order->notes ? " | {$order->notes}" : ''),
+                    ]);
+                }
+
                 return $order;
             });
+
+            if (! empty($shortages)) {
+                // Loud, separate alert — this must never blend in with
+                // routine info/warning logs. A paid order shipped with
+                // an oversold item is a same-day operational issue.
+                Log::critical('storeIfKhqrPaid: order paid but stock oversold', [
+                    'order_id'        => $order->id,
+                    'transaction_ref' => $ref,
+                    'shortages'       => $shortages,
+                ]);
+            }
 
             DB::afterCommit(function () use ($order) {
                 try {
@@ -621,8 +796,21 @@ class OrderController extends Controller
             ], 201);
 
         } catch (\Throwable $th) {
-            Log::error('OrderController@storeIfKhqrPaid: ' . $th->getMessage());
+            // NOTE: by the time we could reach here, Bakong may already
+            // have confirmed payment (step 3) but the Order/Payment
+            // creation itself (step 4a) failed for some *other* reason
+            // (DB outage, etc.) — in that rare case the transaction_ref
+            // is still safely logged below so it can be reconciled
+            // manually. This is a last-resort net, not a substitute for
+            // 4a/4b succeeding normally.
+            Log::critical('storeIfKhqrPaid: unexpected failure AFTER Bakong may have confirmed payment — manual reconciliation may be required', [
+                'transaction_ref' => $ref,
+                'error'           => $th->getMessage(),
+            ]);
             return response()->json(['status' => 'error', 'message' => $th->getMessage()], 500);
+        } finally {
+            // Always release the lock, even on exception/early return.
+            DB::statement('SELECT RELEASE_LOCK(?)', [$lockName]);
         }
     }
 

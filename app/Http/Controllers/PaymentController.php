@@ -48,18 +48,9 @@ class PaymentController extends Controller
     /**
      * PUT /api/admin/payments/{payment}/confirm
      *
-     *  FIX: added an $alreadyPaid guard, mirroring checkStatus() below.
-     *
-     * ROOT CAUSE: previously this locked the row, correctly SKIPPED the
-     * UPDATE when it was already 'paid' (avoiding a duplicate DB write),
-     * but then STILL fired DB::afterCommit(event(OrderPaid))
-     * unconditionally regardless of whether any state actually changed.
-     * On a double-click, a slow network retry, or two concurrent confirm
-     * requests, the second request would do no real work yet still
-     * re-broadcast OrderPaid — causing an unnecessary extra real-time
-     * refresh on every admin screen listening on the 'orders' channel,
-     * and a potential duplicate "payment confirmed" signal to anything
-     * downstream of that event (e.g. customer notifications).
+     * Added an $alreadyPaid guard, mirroring checkStatus() below, so a
+     * double-click / retry never re-broadcasts OrderPaid for a payment
+     * that was already confirmed.
      */
     public function confirm(Payment $payment)
     {
@@ -185,46 +176,57 @@ class PaymentController extends Controller
     }
 
     // ──────────────────────────────────────────────
-    //  CUSTOMER ENDPOINTS
+    //  CUSTOMER / STAFF ENDPOINTS
     // ──────────────────────────────────────────────
 
     /**
      * POST /api/payments
      *
-     * FIX (kept): wraps file upload + Payment::create() in DB::transaction
-     * so a failed create() doesn't leave an orphaned file in storage.
+     * Ownership guard (IDOR fix): the order must belong to the requester,
+     * unless they're admin/staff (who legitimately create payments on
+     * behalf of walk-in / POS customers).
      *
-     * FIX (kept): previously ANY existing 'pending' payment on the order
-     * blocked a new one from being created with a 422. That looked correct
-     * for double-submission protection, but it also permanently broke the
-     * legitimate "Generate New QR" retry flow (POSKhqrModal.jsx /
-     * Checkout.jsx) — once a KHQR QR expired, the stale pending Payment row
-     * was never cleared, so every retry attempt hit this 422 forever, and
-     * the only way to actually pay for that order was for an admin to
-     * manually intervene in the database.
+     * Wraps file upload + Payment::create() in DB::transaction so a
+     * failed create() doesn't leave an orphaned file in storage.
      *
-     * The correct behavior: only a PAID payment should block a new one
-     * (you can't pay twice). Any old PENDING payment for the same order is
-     * stale by definition — the customer is here trying to pay again — so
-     * we void it (status -> 'rejected') and let a fresh pending Payment be
-     * created. This keeps "you can never double-pay" while unblocking
-     * "you can always retry an unpaid order".
+     * Any old PENDING payment for the same order is voided (status ->
+     * 'rejected') before a fresh one is created, so "Generate New QR"
+     * retries never get stuck behind a stale row — only a PAID payment
+     * blocks a new one.
      *
-     * NOTE: this intentionally still creates 'cash' payments with
-     * status = 'pending' (same as khqr/card) — that's correct, since the
-     * money genuinely hasn't been received yet at the moment the order is
-     * placed. What changed is NOT this method — it's which pending
-     * payments count as "needs admin review" (see stats() below and
-     * DashboardController::stats()). A cash payment staying 'pending'
-     * until an admin/rider confirms delivery is accurate bookkeeping; it
-     * simply should never have shared the same "awaiting confirmation"
-     * alert as a KHQR receipt that genuinely needs a human to verify it.
+     * ✅ NEW (Bug 2 fix): `paid_now` — lets a staff/admin caller mark a
+     * cash or card payment as 'paid' immediately at creation time,
+     * instead of always creating it as 'pending'.
      *
-     * NOTE: `amount` is copied straight from `order.total_amount`, which
-     * (as of OrderController::store()'s fix) now correctly includes the
-     * delivery fee for delivery orders. This field is what checkStatus()
-     * below compares against Bakong's reported paid amount — keeping it
-     * accurate here is what makes that verification meaningful at all.
+     * ROOT CAUSE THIS FIXES: this endpoint always created Payment rows
+     * as status='pending', which is correct for the storefront's Cash-
+     * on-Delivery flow (Checkout.jsx) — the rider hasn't collected
+     * money yet. But ManagementSaler.jsx (the in-store POS) calls this
+     * SAME endpoint for Cash and Card sales, where the cashier has
+     * ALREADY physically collected the money at the register the
+     * instant the sale is rung up. Because every POS cash/card payment
+     * stayed 'pending' forever (nothing in the POS flow ever called
+     * confirm()), two things broke:
+     *   1. order.status never advanced to 'paid', so those sales never
+     *      counted in Order::stats()/PaymentController::stats() revenue
+     *      totals (both filter on status = 'paid').
+     *   2. Every single POS cash/card sale piled up in the admin
+     *      "Payment Management" pending queue, indistinguishable from a
+     *      KHQR receipt that genuinely needs a human to verify it —
+     *      requiring an admin to manually click "Confirm" on every POS
+     *      sale, which isn't viable at register speed.
+     *
+     * Restricted to admin/staff AND method cash/card only — KHQR must
+     * always go through Bakong verification (checkStatus/
+     * storeIfKhqrPaid), never a client-asserted "trust me, it's paid"
+     * flag, or anyone could fake a paid transaction.
+     *
+     * `amount` is copied straight from `order.total_amount`, which (as
+     * of OrderController::store()'s fix) now correctly includes both
+     * the delivery fee for delivery orders AND tax where enabled. This
+     * field is what checkStatus() below compares against Bakong's
+     * reported paid amount — keeping it accurate here is what makes
+     * that verification meaningful at all.
      */
     public function store(Request $request)
     {
@@ -233,12 +235,22 @@ class PaymentController extends Controller
             'method'          => 'required|in:cash,khqr,card',
             'transaction_ref' => 'nullable|string|unique:payments,transaction_ref',
             'receipt_image'   => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
+            'paid_now'        => 'sometimes|boolean', // ✅ NEW
         ]);
 
         $receiptPath = null;
 
         try {
             $order = Order::findOrFail($validated['order_id']);
+
+            // Ownership guard (IDOR fix).
+            $user = auth()->user();
+            if ($order->user_id !== $user->id && ! in_array($user->role, ['admin', 'staff'])) {
+                return response()->json([
+                    'status'  => 'error',
+                    'message' => 'Unauthorized',
+                ], 403);
+            }
 
             $alreadyPaid = Payment::where('order_id', $order->id)
                 ->where('status', 'paid')
@@ -251,7 +263,7 @@ class PaymentController extends Controller
                 ], 422);
             }
 
-            // ✅ void stale pending payments instead of blocking retries.
+            // Void stale pending payments instead of blocking retries.
             // This intentionally happens OUTSIDE the create transaction below —
             // even if create() subsequently fails, we don't want to resurrect
             // a stale pending row as "the" payment for this order.
@@ -259,28 +271,46 @@ class PaymentController extends Controller
                 ->where('status', 'pending')
                 ->update(['status' => 'rejected']);
 
-            $payment = DB::transaction(function () use ($request, $validated, $order, &$receiptPath) {
+            // ✅ NEW: only a staff/admin can mark a payment paid at creation
+            // time, and only for cash/card — money physically collected at
+            // the register. KHQR must always go through Bakong verification.
+            $markPaidNow = in_array($user->role, ['admin', 'staff'])
+                && ($validated['paid_now'] ?? false)
+                && in_array($validated['method'], ['cash', 'card']);
+
+            $payment = DB::transaction(function () use ($request, $validated, $order, &$receiptPath, $markPaidNow) {
                 if ($request->hasFile('receipt_image')) {
                     $receiptPath = $request->file('receipt_image')->store('payments/receipts', 'public');
                 }
 
-                return Payment::create([
+                $payment = Payment::create([
                     'order_id'        => $order->id,
                     'user_id'         => auth()->id(),
                     // order.total_amount already reflects any staff/POS
-                    // discount applied at order-creation time (see
-                    // OrderController::store()) AND the delivery fee for
-                    // delivery orders, so this always matches what the
-                    // customer is actually shown/charged — no separate
-                    // discount or delivery-fee math needed here.
+                    // discount applied at order-creation time, tax (see
+                    // OrderController::store()), AND the delivery fee for
+                    // delivery orders — so this always matches what the
+                    // customer is actually shown/charged.
                     'amount'          => $order->total_amount,
                     'method'          => $validated['method'],
-                    'status'          => 'pending',
+                    'status'          => $markPaidNow ? 'paid' : 'pending',
                     'transaction_ref' => $validated['transaction_ref'] ?? null,
                     'receipt_image'   => $receiptPath,
-                    'paid_at'         => null,
+                    'paid_at'         => $markPaidNow ? now() : null,
                 ]);
+
+                if ($markPaidNow) {
+                    $order->update(['status' => 'paid']);
+                }
+
+                return $payment;
             });
+
+            if ($markPaidNow) {
+                DB::afterCommit(function () use ($payment) {
+                    event(new OrderPaid($payment->order->fresh()));
+                });
+            }
 
             return response()->json([
                 'status' => 'success',
@@ -300,25 +330,24 @@ class PaymentController extends Controller
     /**
      * POST /api/payments/{payment}/check-status
      *
-     * FIX (kept): config('services.bakong.token') — original key was wrong
-     * ('api_token' → token was always null)
-     * FIX (kept): role check now also includes 'staff', consistent with the
-     * role:admin,staff middleware used elsewhere.
-     *
-     * FIX (kept — the critical one): a KHQR "dynamic QR" is generated
-     * entirely CLIENT-SIDE (see utils/khqr.js — `KHQR.generate()` runs in
-     * the browser, no server round-trip to Bakong at all). Bakong's
-     * `checkTransactionByMD5` endpoint returns `responseCode: 0` simply to
-     * mean "the API request itself was processed successfully" — it
-     * returns that same code 0 whether or not a matching PAID transaction
-     * actually exists yet. Whether a real payment was found is indicated
-     * by the `data` field: null/empty means "nothing paid yet", a populated
-     * object means "found it".
+     * A KHQR "dynamic QR" is generated entirely CLIENT-SIDE (see
+     * utils/khqr.js — `KHQR.generate()` runs in the browser, no server
+     * round-trip to Bakong at all). Bakong's `checkTransactionByMD5`
+     * endpoint returns `responseCode: 0` simply to mean "the API request
+     * itself was processed successfully" — it returns that same code 0
+     * whether or not a matching PAID transaction actually exists yet.
+     * Whether a real payment was found is indicated by the `data` field:
+     * null/empty means "nothing paid yet", a populated object means
+     * "found it".
      *
      * Only treat it as paid when Bakong's `data` is actually present
      * AND its reported amount matches what we expect (`payments.amount`).
      * The amount check additionally guards against a stale/reused MD5
      * ever confirming the wrong order.
+     *
+     * Diagnostic logging added around every branch of this method so
+     * that a "customer paid but system never saw it" report can be
+     * root-caused from storage/logs/laravel.log alone.
      */
     public function checkStatus(Payment $payment)
     {
@@ -348,9 +377,9 @@ class PaymentController extends Controller
 
             $responseCode = $result->responseCode ?? ($result->status->code ?? null);
 
-            // FIX: `responseCode === 0` only means the API call
-            // succeeded — it does NOT mean a paid transaction was found.
-            // Require an actual transaction payload before trusting it.
+            // `responseCode === 0` only means the API call succeeded — it
+            // does NOT mean a paid transaction was found. Require an
+            // actual transaction payload before trusting it.
             $transactionData = $result->data ?? null;
 
             // Extra safety: confirm the amount Bakong reports actually
@@ -360,6 +389,17 @@ class PaymentController extends Controller
             $amountMatches = $transactionData
                 && isset($transactionData->amount)
                 && abs((float) $transactionData->amount - (float) $payment->amount) < 0.01;
+
+            Log::info('Bakong checkStatus debug', [
+                'payment_id'      => $payment->id,
+                'transaction_ref' => $payment->transaction_ref,
+                'response_code'   => $responseCode,
+                'bakong_amount'   => $transactionData->amount ?? null,
+                'bakong_currency' => $transactionData->currency ?? null,
+                'expected_amount' => (float) $payment->amount,
+                'amount_matches'  => $amountMatches,
+                'has_data'        => (bool) $transactionData,
+            ]);
 
             if ($responseCode === 0 && $transactionData && $amountMatches) {
                 $alreadyPaid = false;
@@ -389,9 +429,21 @@ class PaymentController extends Controller
                 ]);
             }
 
+            Log::warning('Bakong checkStatus: not marked paid', [
+                'payment_id'       => $payment->id,
+                'response_code_ok' => $responseCode === 0,
+                'has_data'         => (bool) $transactionData,
+                'amount_matches'   => $amountMatches,
+            ]);
+
             return response()->json(['status' => 'success', 'paid' => false]);
         } catch (\Throwable $th) {
-            Log::error('Bakong checkStatus failed for payment #' . $payment->id . ': ' . $th->getMessage());
+            Log::error('Bakong checkStatus failed', [
+                'payment_id' => $payment->id,
+                'message'    => $th->getMessage(),
+                'trace'      => $th->getTraceAsString(),
+            ]);
+
             return response()->json([
                 'status'  => 'success',
                 'paid'    => false,
@@ -452,7 +504,7 @@ class PaymentController extends Controller
         }
     }
 
-    
+
     public function stats()
     {
         try {
@@ -465,6 +517,13 @@ class PaymentController extends Controller
 
                 'by_method' => Payment::selectRaw('method, COUNT(*) as count, SUM(amount) as total')
                     ->where('status', 'paid')->groupBy('method')->get(),
+
+                // NOTE: still excludes cash — cash legitimately stays
+                // 'pending' until an admin/rider confirms delivery for
+                // COD orders. With the paid_now fix, POS cash/card sales
+                // no longer sit here at all (they're created already
+                // 'paid'), so this count now accurately reflects only
+                // KHQR/card payments genuinely awaiting human review.
                 'pending_confirmation_count' => Payment::where('status', 'pending')
                     ->where('method', '!=', 'cash')
                     ->count(),

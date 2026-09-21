@@ -52,25 +52,25 @@ class AuthController extends Controller
  */
     public function login(Request $request) {
         
-        // Validate login request
+        // Validate login  request
         $request->validate([
             'email'    => 'required|email',    
             'password' => 'required',          
         ]);
 
         try {
-            // Authenticate user credentials against the database
-            // Automatically compares the provided password with the hashed password
-            if (!Auth::attempt($request->only('email', 'password'))) {
+            
+            // Auth::attempt() takes the email and password entered by the user and checks whether it matches the user in the database.
+            if (!Auth::attempt($request->only('email', 'password'))) { // Take only 2 columns.
                 
                 // Return error if authentication fails
                 return response()->json([
                     'status'  => 'error',
                     'message' => 'Invalid email or password'
-                ], 401);// 401 Unauthorized
+                ], 401);// No access because authentication failed.
             }
 
-            // Retrieve authenticated user
+            // Get the user with this email from the database and put it in $user. 
             $user = User::where('email', $request->email)->firstOrFail();
 
             // Generate new access token

@@ -5,16 +5,6 @@ namespace App\Services;
 use App\Models\Order;
 use App\Models\Product;
 
-/**
- * FIX: Centralized stock logic. Previously, "increment stock_quantity"
- * for restoring items was copy-pasted independently in THREE places
- * (OrderController::update() on cancel, OrderController::destroy(),
- * OrderController::cancel()). Any future change to restore logic (e.g.
- * adding a stock-movement audit log, handling variants, clamping to a
- * max stock level) would need to be remembered and applied in all three
- * spots — a classic source of drift bugs. Now there is exactly one
- * place that knows how to decrement and restore stock.
- */
 class InventoryService
 {
     /**

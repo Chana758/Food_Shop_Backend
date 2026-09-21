@@ -148,12 +148,6 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
         // Reports — view statistics and analytics
         Route::get('/admin/reports/stats', [ReportController::class, 'stats']);
 
-        // ✅ CHANGED — Settings moved here from the admin-only group below.
-        // Global system configuration (incl. Appearance/theme accent color)
-        // is now shared: both admin and staff can view AND edit, so a
-        // staff account sees — and can set — the exact same live theme
-        // as admin instead of falling back to hardcoded defaults on a
-        // 403 from SettingsContext.jsx's fetchSettings().
         Route::prefix('admin/settings')->group(function () {
             Route::get('/', [SettingController::class, 'index']);
             Route::put('/', [SettingController::class, 'update']);
@@ -201,7 +195,6 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
             Route::delete('/{order}',              [OrderController::class,     'destroy']);
             Route::post('/{order}/items',          [OrderItemController::class, 'store']);
             Route::put('/{order}/assign-rider',    [OrderController::class,     'assignRider']);
-            // ✅ CHANGED: PUT -> POST for delivery-status to handle file uploads properly
             Route::post('/{order}/delivery-status', [OrderController::class,     'updateDeliveryStatus']);
         });
 
