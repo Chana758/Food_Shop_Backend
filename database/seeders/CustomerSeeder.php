@@ -52,11 +52,11 @@ class CustomerSeeder extends Seeder
             ],
         ];
 
-        //បានកែសម្រួល៖ រត់ Loop ដោយប្រើ firstOrCreate ដើម្បីការពារ Error ជាន់អ៊ីមែលគ្នា
+        
         foreach ($customers as $customer) {
             User::firstOrCreate(
-                ['email' => $customer['email']], // លក្ខខណ្ឌឆែកមើល (បើមាន Email នេះហើយ គឺមិនបញ្ចូលជាន់ឡើយ)
-                $customer                        // បើអត់ទាន់មានទេ ទើបយកដុំទិន្នន័យនេះទៅបង្កើតថ្មី
+                ['email' => $customer['email']], 
+                $customer                        
             );
         }
     }
