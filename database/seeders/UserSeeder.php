@@ -16,7 +16,7 @@ class UserSeeder extends Seeder
             'name' => 'Sam Channa',
             'email' => 'csam26176@gmail.com',
             'password' => bcrypt('125476'),
-            'role' => 'admin', // បន្ថែម Column role នេះឱ្យត្រូវនឹង Database របស់បង
+            'role' => 'admin',
         ]);
     }
 }
