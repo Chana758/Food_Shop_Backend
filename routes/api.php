@@ -22,7 +22,7 @@ use App\Http\Controllers\Api\Admin\ReportController;
 use App\Http\Controllers\API\BackupController;
 use App\Http\Controllers\Api\Admin\SettingController;
 use App\Http\Controllers\PricingController;
-
+use Illuminate\Support\Facades\DB;
 // ======================================
 // PUBLIC
 // ======================================
@@ -39,6 +39,11 @@ Route::post('/contacts',     [ContactController::class,  'store']);
 // Public review listing — approved only, filterable by ?product_id=
 Route::get('/reviews', [ReviewController::class, 'index']);
 
+// Keep-alive: ping from UptimeRobot (Ping the DB to prevent Supabase from pausing)
+Route::get('/ping', function () {
+    DB::select('select 1');
+    return response()->json(['status' => 'ok']);
+});
 // ======================================
 // PROTECTED — Authenticated users
 // ======================================
