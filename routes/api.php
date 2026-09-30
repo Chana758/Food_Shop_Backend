@@ -22,7 +22,7 @@ use App\Http\Controllers\Api\Admin\ReportController;
 use App\Http\Controllers\API\BackupController;
 use App\Http\Controllers\Api\Admin\SettingController;
 use App\Http\Controllers\PricingController;
-use Illuminate\Support\Facades\DB;
+// use Illuminate\Support\Facades\DB;
 // ======================================
 // PUBLIC
 // ======================================
