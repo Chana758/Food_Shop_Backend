@@ -18,6 +18,7 @@ class ReservationController extends Controller
 
     // ─── CUSTOMER ENDPOINTS ──────────────────────────────────────────────────
 
+    /** List reservations, newest first (customers see only their own). */
     public function index(Request $request)
     {
         try {
@@ -38,6 +39,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Show one reservation (owner, admin or staff). */
     public function show(Request $request, $id)
     {
         try {
@@ -60,6 +62,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Create a pending reservation if the table is free. */
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -117,6 +120,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Owner edits a pending reservation (table, time, guests, notes). */
     public function update(Request $request, $id)
     {
         $validated = $request->validate([
@@ -167,14 +171,7 @@ class ReservationController extends Controller
         }
     }
 
-    /**
-     * POST /api/reservations/{id}/cancel
-     *
-     * FIX #1: previously this method NEVER sent a status email to the
-     * customer — it only broadcast the event. Now it also calls
-     * sendStatusEmail() with status 'cancelled', matching the pattern used
-     * in confirm()/reject()/complete().
-     */
+    /** Cancel a reservation (owner or admin) and email the customer. */
     public function cancel(Request $request, $id)
     {
         try {
@@ -208,7 +205,7 @@ class ReservationController extends Controller
                     Log::warning('ReservationController@cancel broadcast failed: ' . $broadcastError->getMessage());
                 }
 
-                // FIX #1: send the cancellation email (was missing entirely before).
+                // Notify the customer by email
                 $this->sendStatusEmail($reservation, 'cancelled', null);
             });
 
@@ -224,6 +221,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Counts: total, pending, confirmed, and today's active reservations. */
     public function stats(Request $request)
     {
         try {
@@ -249,6 +247,7 @@ class ReservationController extends Controller
 
     // ─── ADMIN ENDPOINTS ─────────────────────────────────────────────────────
 
+    /** Admin: confirm a pending reservation, then notify and email the customer. */
     public function confirm(Request $request, $id)
     {
         $validated = $request->validate([
@@ -337,6 +336,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Admin: reject a pending reservation, then notify and email the customer. */
     public function reject(Request $request, $id)
     {
         $validated = $request->validate([
@@ -410,6 +410,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Admin: mark a confirmed reservation as completed and email the customer. */
     public function complete(Request $request, $id)
     {
         $validated = $request->validate([
@@ -462,6 +463,7 @@ class ReservationController extends Controller
         }
     }
 
+    /** Admin: delete a reservation. */
     public function destroy($id)
     {
         try {
@@ -478,6 +480,7 @@ class ReservationController extends Controller
 
     // ─── PRIVATE HELPERS ─────────────────────────────────────────────────────
 
+    /** True if the table has an overlapping booking within the default 2-hour slot. */
     private function hasConflict($tableId, $reservedAt, ?int $excludeId = null, bool $onlyConfirmed = false): bool
     {
         $start = Carbon::parse($reservedAt);
@@ -498,16 +501,7 @@ class ReservationController extends Controller
             ->exists();
     }
 
-    /**
-     * FIX #2: switched Mail::to()->queue() to Mail::to()->send().
-     *
-     * Reason: queue() only inserts a row into the `jobs` table — it requires
-     * a running `php artisan queue:work` (or Supervisor/cron) to actually
-     * dispatch the email. Since this project has no worker running, every
-     * queued reservation email sat in `jobs` (or silently failed into
-     * `failed_jobs`) and was never sent. send() delivers synchronously in
-     * the same request, exactly like the working ContactController mailer.
-     */
+    /** Sends the status email right away (no queue worker needed). */
     private function sendStatusEmail(Reservation $reservation, string $status, ?string $note): void
     {
         $email = $reservation->user?->email;
@@ -517,7 +511,7 @@ class ReservationController extends Controller
         }
 
         try {
-            Mail::to($email)->send(new ReservationStatusMail($reservation, $status, $note)); // FIX #2
+            Mail::to($email)->send(new ReservationStatusMail($reservation, $status, $note));
         } catch (\Throwable $e) {
             Log::error('ReservationController: failed to send status email', [
                 'reservation_id' => $reservation->id,

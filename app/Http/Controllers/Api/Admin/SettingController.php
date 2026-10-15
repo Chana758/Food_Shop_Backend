@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Log;
 
 class SettingController extends Controller
 {
-    // Only these keys can ever be written to the settings table.
+    // Keys allowed to be written
     private const ALLOWED_KEYS = [
         'restaurant_name', 'tagline', 'phone', 'email', 'address',
         'currency', 'timezone', 'language',
@@ -18,15 +18,16 @@ class SettingController extends Controller
         'show_logo_receipt', 'show_tax_receipt', 'tax_rate', 'receipt_note',
         'table_service', 'takeaway',
         'dark_mode', 'compact_mode', 'accent_color',
-        'theme_target', // 'sidebar' | 'page'
+        'theme_target', 
         'two_fa', 'auto_logout', 'logout_time',
 
-        //  NEW — Backup & Recovery schedule
-        'backup_frequency', // 'hourly' | 'daily' | 'weekly' | 'monthly'
-        'backup_time',      // 'HH:mm'
-        'backup_keep',      // integer, stored as string
+        // Backup & recovery
+        'backup_frequency',
+        'backup_time',      
+        'backup_keep',     
     ];
 
+    // Default values
     private const DEFAULTS = [
         'restaurant_name'    => 'Khmer-Fresh',
         'tagline'            => 'Authentic Traditional Food',
@@ -55,13 +56,13 @@ class SettingController extends Controller
         'auto_logout'        => true,
         'logout_time'        => '30',
 
-        // NEW — Backup & Recovery defaults
+        // Backup & recovery
         'backup_frequency'   => 'daily',
         'backup_time'        => '02:00',
         'backup_keep'        => '7',
     ];
 
-    // Keys stored as text in DB but represent booleans in the frontend.
+    // Stored as text, used as booleans
     private const BOOLEAN_KEYS = [
         'notify_new_order', 'notify_low_stock', 'notify_payment',
         'notify_daily_report', 'sound_alert',
@@ -70,15 +71,13 @@ class SettingController extends Controller
         'dark_mode', 'compact_mode', 'two_fa', 'auto_logout',
     ];
 
-    // String-enum keys, validated against a fixed allowlist.
+    // Enum keys (fixed allowlist)
     private const ENUM_KEYS = [
         'theme_target'     => ['sidebar', 'page'],
-        'backup_frequency' => ['hourly', 'daily', 'weekly', 'monthly'], //  NEW
+        'backup_frequency' => ['hourly', 'daily', 'weekly', 'monthly'],
     ];
 
-    /**
-     * GET /api/admin/settings
-     */
+    // GET /api/admin/settings
     public function index()
     {
         try {
@@ -109,13 +108,11 @@ class SettingController extends Controller
         }
     }
 
-    /**
-     * PUT /api/admin/settings
-     */
+    // PUT /api/admin/settings
     public function update(Request $request)
     {
         try {
-            //  NEW — light validation for backup fields before whitelisting
+            // Validate backup fields
             $request->validate([
                 'backup_frequency' => 'sometimes|string|in:hourly,daily,weekly,monthly',
                 'backup_time'      => 'sometimes|date_format:H:i',

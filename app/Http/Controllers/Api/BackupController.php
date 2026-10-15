@@ -10,18 +10,17 @@ use Illuminate\Support\Facades\Log;
 
 class BackupController extends Controller
 {
+    /** Get the first configured backup disk and the backup folder name. */
     private function resolveDisk(): array
     {
         $disks = config('backup.backup.destination.disks', []);
-        $diskName = $disks[0] ?? 'local'; 
+        $diskName = $disks[0] ?? 'local';
         $folderName = config('backup.backup.name', 'Laravel');
 
         return [Storage::disk($diskName), $folderName];
     }
 
-    /**
-     * GET /api/admin/backups
-     */
+    /** List backup files (.zip / .sql), newest first. */
     public function index()
     {
         try {
@@ -48,7 +47,7 @@ class BackupController extends Controller
             }
 
             $backups = array_reverse($backups);
-            // assign id AFTER reverse so it displays sequentially (1,2,3...)
+            // Set id after reversing so it counts 1, 2, 3...
             foreach ($backups as $i => &$b) {
                 $b['id'] = $i + 1;
             }
@@ -69,9 +68,7 @@ class BackupController extends Controller
         }
     }
 
-    /**
-     * POST /api/admin/backups
-     */
+    /** Run a database-only backup now. */
     public function store(Request $request)
     {
         try {
@@ -92,13 +89,11 @@ class BackupController extends Controller
         }
     }
 
-    /**
-     * GET /api/admin/backups/{fileName}/download
-     */
+    /** Download one backup file. */
     public function download($fileName)
     {
         [$disk, $folderName] = $this->resolveDisk();
-        $filePath = $folderName . '/' . basename($fileName); // basename() guards path traversal
+        $filePath = $folderName . '/' . basename($fileName); // basename() blocks path traversal
 
         if (!$disk->exists($filePath)) {
             return response()->json([
@@ -110,9 +105,7 @@ class BackupController extends Controller
         return $disk->download($filePath);
     }
 
-    /**
-     * DELETE /api/admin/backups/{fileName}
-     */
+    /** Delete one backup file. */
     public function destroy($fileName)
     {
         try {

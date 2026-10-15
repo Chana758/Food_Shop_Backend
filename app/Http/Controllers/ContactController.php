@@ -14,17 +14,7 @@ use Illuminate\Support\Facades\Mail;
 
 class ContactController extends Controller
 {
-    /**
-     * GET /api/admin/contacts/stats
-     * Quick counts for the admin dashboard contact widget.
-     *
-     * IMPORTANT: this route MUST be registered BEFORE /{id} in api.php,
-     * otherwise Laravel will try to bind "stats" as the {id} wildcard and
-     * return a 404 (or a model-not-found 404 if using route–model binding).
-     *
-     *   Route::get('/stats', [ContactController::class, 'stats']);  ← first
-     *   Route::get('/{id}',  [ContactController::class, 'show']);   ← second
-     */
+    // Count messages by status. Register before /{id} in routes.
     public function stats()
     {
         try {
@@ -49,10 +39,7 @@ class ContactController extends Controller
         }
     }
 
-    /**
-     * GET /api/admin/contacts
-     * Admin/staff: list all contact messages with filters.
-     */
+    // List messages, newest first. Optional ?status= filter.
     public function index(Request $request)
     {
         try {
@@ -69,10 +56,7 @@ class ContactController extends Controller
         }
     }
 
-    /**
-     * GET /api/admin/contacts/{id}
-     * Admin/staff: view one message and auto-mark it as read.
-     */
+    // Show one message and mark it as read.
     public function show($id)
     {
         try {
@@ -90,15 +74,7 @@ class ContactController extends Controller
         }
     }
 
-    /**
-     * POST /api/contacts  ← public route (guests allowed)
-     *
-     * FIX: route was '/contects' (typo). Corrected in routes/api.php.
-     * FIX: fires ContactSubmitted event after commit so the admin dashboard
-     *      picks up the new message in real time without needing a dedicated
-     *      frontend channel — the event piggybacks on the existing 'orders'
-     *      channel that useEcho already listens to.
-     */
+    // Save a contact message (guests allowed).
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -111,7 +87,7 @@ class ContactController extends Controller
 
         try {
             $contact = Contact::create([
-                'user_id' => Auth::id(), // null for guests — intentional
+                'user_id' => Auth::id(), // null for guests
                 'name'    => $validated['name'],
                 'email'   => $validated['email'],
                 'phone'   => $validated['phone'] ?? null,
@@ -120,9 +96,7 @@ class ContactController extends Controller
                 'status'  => Contact::STATUS_UNREAD,
             ]);
 
-            // Nudge the admin dashboard in real time so the unread badge
-            // updates immediately. Wrapped in try/catch so a Reverb outage
-            // never causes the contact submission itself to fail.
+            // Broadcast to admin (failure must not break submit)
             try {
                 event(new ContactSubmitted($contact));
             } catch (\Throwable $broadcastError) {
@@ -141,16 +115,7 @@ class ContactController extends Controller
         }
     }
 
-    /**
-     * POST /api/admin/contacts/{id}/reply
-     * Admin replies to a contact message.
-     *
-     * FIX: previously only notified logged-in users in-app; guests
-     * (user_id === null, the common case for a public contact form)
-     * received nothing at all. Now ALWAYS emails the contact's email
-     * address — the one channel guaranteed to exist — and additionally
-     * creates an in-app notification when the sender was logged in.
-     */
+    // Save the admin reply, then email and notify the sender.
     public function reply(Request $request, $id)
     {
         $validated = $request->validate([
@@ -167,17 +132,15 @@ class ContactController extends Controller
                 'status'        => Contact::STATUS_REPLIED,
             ]);
 
-            // Always email — works for both guests and logged-in users,
-            // since 'email' is a required field on the contact form.
+            // Always email (guests and users)
             try {
                 Mail::to($contact->email)->send(new ContactReplyMail($contact));
             } catch (\Throwable $mailError) {
-                // Reply is still saved even if SMTP is down; log it so
-                // it doesn't fail silently and the admin can be alerted.
+                // Reply stays saved if mail fails
                 Log::error('ContactController@reply mail failed: ' . $mailError->getMessage());
             }
 
-            // Additionally notify in-app if the sender was logged in.
+            // In-app notification for logged-in senders
             if ($contact->user_id) {
                 Notification::create([
                     'user_id'        => $contact->user_id,
@@ -202,10 +165,7 @@ class ContactController extends Controller
         }
     }
 
-    /**
-     * DELETE /api/admin/contacts/{id}
-     * Admin hard-deletes a contact message.
-     */
+    // Delete a contact message.
     public function destroy($id)
     {
         try {

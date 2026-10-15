@@ -9,10 +9,7 @@ use Illuminate\Support\Facades\Log;
 
 class NotificationController extends Controller
 {
-    /**
-     * GET /api/notifications
-     * Logged-in user's own notifications, newest first, with unread count.
-     */
+    // List my notifications, newest first, with unread count.
     public function index(Request $request)
     {
         try {
@@ -38,17 +35,13 @@ class NotificationController extends Controller
         }
     }
 
-    /**
-     * GET /api/notifications/{id}
-     * View a single notification and mark it as read automatically.
-     */
+    // Show one of my notifications and mark it as read.
     public function show($id)
     {
         try {
             $notification = Notification::where('user_id', Auth::id())->findOrFail($id);
 
-            // Use the Model's markAsRead() helper — it guards the update
-            // with an is_read check so we don't update read_at repeatedly.
+            // markAsRead() skips if already read
             $notification->markAsRead();
 
             return response()->json(['status' => 'success', 'data' => $notification->fresh()], 200);
@@ -59,15 +52,7 @@ class NotificationController extends Controller
         }
     }
 
-    /**
-     * POST /api/admin/notifications
-     * Admin manually sends a notification to a specific user.
-     * Also called internally from other controllers (ReservationController,
-     * ContactController) to notify users of status changes.
-     *
-     * FIX: wrapped in try/catch so failed Notification::create() returns a
-     * structured error instead of a raw Laravel exception page.
-     */
+    // Admin: send a notification to a user.
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -101,10 +86,7 @@ class NotificationController extends Controller
         }
     }
 
-    /**
-     * PUT /api/notifications/{id}/read
-     * Mark a specific notification as read.
-     */
+    // Mark one of my notifications as read.
     public function markAsRead($id)
     {
         try {
@@ -123,10 +105,7 @@ class NotificationController extends Controller
         }
     }
 
-    /**
-     * POST /api/notifications/read-all
-     * Mark all of the logged-in user's notifications as read in one query.
-     */
+    // Mark all my unread notifications as read.
     public function markAllAsRead()
     {
         try {
@@ -148,10 +127,7 @@ class NotificationController extends Controller
         }
     }
 
-    /**
-     * DELETE /api/notifications/{id}
-     * Owner deletes their own notification.
-     */
+    // Delete one of my notifications.
     public function destroy($id)
     {
         try {

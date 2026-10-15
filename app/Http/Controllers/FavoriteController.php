@@ -7,10 +7,7 @@ use Illuminate\Http\Request;
 
 class FavoriteController extends Controller
 {
-    /**
-     * GET /api/favorites
-     * Get all favorites for the authenticated user
-     */
+    /** List the current user's favorites, newest first. */
     public function index()
     {
         try {
@@ -32,10 +29,7 @@ class FavoriteController extends Controller
         }
     }
 
-    /**
-     * GET /api/admin/favorites
-     * Admin — get all favorites grouped by customer
-     */
+    /** Admin: all favorites grouped by customer name ("Guest" if no user). */
     public function adminGetAllFavorites()
     {
         try {
@@ -59,10 +53,7 @@ class FavoriteController extends Controller
         }
     }
 
-    /**
-     * POST /api/favorites
-     * Add a product to favorites
-     */
+    /** Add a product to favorites (no duplicate if already added). */
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -89,10 +80,7 @@ class FavoriteController extends Controller
         }
     }
 
-    /**
-     * DELETE /api/favorites/:product_id
-     * User removes own favorite by product_id
-     */
+    /** Remove the current user's favorite by product id. */
     public function destroy($productId)
     {
         try {
@@ -120,10 +108,7 @@ class FavoriteController extends Controller
         }
     }
 
-    /**
-     * DELETE /api/admin/favorites/:id
-     * Admin removes any favorite by favorite id
-     */
+    /** Admin: remove any favorite by favorite id. */
     public function adminDestroy($id)
     {
         try {
@@ -143,10 +128,7 @@ class FavoriteController extends Controller
         }
     }
 
-    /**
-     * GET /api/favorites/check/:product_id
-     * Check if a product is in the authenticated user's favorites
-     */
+    /** Check if a product is in the current user's favorites. */
     public function check($productId)
     {
         $isFav = Favorite::where('user_id', auth()->id())

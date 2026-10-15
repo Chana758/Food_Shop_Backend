@@ -10,9 +10,7 @@ class RiderController extends Controller
 {
     private const VALID_STATUSES = ['available', 'busy', 'offline'];
 
-    /**
-     * GET /api/admin/riders
-     */
+    /** List riders, newest first. Optional ?status= filter. */
     public function index(Request $request)
     {
         try {
@@ -28,9 +26,7 @@ class RiderController extends Controller
         }
     }
 
-    /**
-     * POST /api/admin/riders
-     */
+    /** Add a new rider. */
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -49,16 +45,13 @@ class RiderController extends Controller
         }
     }
 
-    /**
-     * PUT /api/admin/riders/{rider}
-     */
+    /** Edit rider info or change status (available / busy / offline). */
     public function update(Request $request, Rider $rider)
     {
         $validated = $request->validate([
             'name'         => 'sometimes|string|max:255',
             'phone'        => 'sometimes|string|max:20',
             'vehicle_type' => 'nullable|string|max:50',
-            //  FIX: ប្រើ constant ជំនួស hardcode string — តែម្តងគេចថា middleware/validation ត្រូវគ្នាជានិច្ច
             'status'       => 'sometimes|in:' . implode(',', self::VALID_STATUSES),
         ]);
 
@@ -72,9 +65,7 @@ class RiderController extends Controller
         }
     }
 
-    /**
-     * DELETE /api/admin/riders/{rider}
-     */
+    /** Remove a rider. */
     public function destroy(Rider $rider)
     {
         try {

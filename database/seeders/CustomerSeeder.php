@@ -13,7 +13,7 @@ class CustomerSeeder extends Seeder
      */
     public function run(): void
     {
-        // បង្កើតទិន្នន័យអតិថិជនគំរូ ៥ នាក់
+        
         $customers = [
             [
                 'name' => 'Vy Za',

@@ -9,16 +9,6 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-/**
- * Reservation status-change event — mirrors OrderStatusChanged exactly so
- * the admin dashboard can use the same useEcho broadcast-wide listening
- * pattern already wired up for orders/delivery.
- *
- * Fired by:
- *   - ReservationController::store()   (newStatus: 'created')
- *   - ReservationController::update()  (status: confirmed/rejected/completed/cancelled)
- *   - ReservationController::cancel()  (status: cancelled)
- */
 class ReservationStatusChanged implements ShouldBroadcastNow
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
@@ -30,12 +20,7 @@ class ReservationStatusChanged implements ShouldBroadcastNow
         $this->reservation->loadMissing(['user', 'table', 'confirmedBy']);
     }
 
-    /**
-     * Shared with the 'orders' broadcasting setup conceptually, but kept
-     * on its own channel name so the AdminDashboard reservation widget
-     * (if/when built) can subscribe independently of order traffic,
-     * rather than filtering a mixed-purpose channel client-side.
-     */
+    // Broadcast on the reservations channel.ther than filtering a mixed-purpose channel client-side.
     public function broadcastOn(): array
     {
         return [
@@ -43,11 +28,13 @@ class ReservationStatusChanged implements ShouldBroadcastNow
         ];
     }
 
+    // Match the frontend event listener.
     public function broadcastAs(): string
     {
         return 'reservation.status.changed';
     }
-
+    
+    // Send reservation details to subscribers.
     public function broadcastWith(): array
     {
         return [

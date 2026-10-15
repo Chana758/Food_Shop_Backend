@@ -36,12 +36,7 @@ class OrderItemController extends Controller
         return $hasValidDiscount ? (float) $discount : $price;
     }
 
-    /**
-     * Recompute order.total_amount from scratch based on its current
-     * items — same pattern as OrderController::store(). Never
-     * incrementally patch the old total; always derive it fresh so it
-     * can never silently drift from what the items actually add up to.
-     */
+    // Recompute order total from its items (never patch the old total)
     private function recalculateOrderTotal(Order $order): void
     {
         $itemsTotal = (float) $order->items()->sum('subtotal');
@@ -66,9 +61,7 @@ class OrderItemController extends Controller
         }
     }
 
-    // ──────────────────────────────────────────────
-    //  GET /api/admin/orders/{order}/items
-    // ──────────────────────────────────────────────
+    // List an order's items with their products.
     public function index(Order $order)
     {
         return response()->json([
@@ -77,10 +70,7 @@ class OrderItemController extends Controller
         ], 200);
     }
 
-    // ──────────────────────────────────────────────
-    //  POST /api/admin/orders/{order}/items
-    //  Add one item to an EXISTING order.
-    // ──────────────────────────────────────────────
+    // Add an item to an existing order and deduct stock.
     public function store(Request $request, Order $order)
     {
         $this->assertEditable($order);
@@ -130,9 +120,7 @@ class OrderItemController extends Controller
         }
     }
 
-    // ──────────────────────────────────────────────
-    //  PUT /api/order-items/{orderItem}
-    // ──────────────────────────────────────────────
+    // Change an item's quantity or note (adjusts stock by the difference).
     public function update(Request $request, OrderItem $orderItem)
     {
         $order = $orderItem->order;
@@ -153,8 +141,7 @@ class OrderItemController extends Controller
                         throw new \Exception("Insufficient stock for: {$product->name}.");
                     }
 
-                    // Positive diff decrements stock; negative diff
-                    // (quantity reduced) correctly restores it.
+                    // Negative diff restores stock
                     $product->decrement('stock_quantity', $diff);
 
                     $orderItem->quantity = $validated['quantity'];
@@ -180,9 +167,7 @@ class OrderItemController extends Controller
         }
     }
 
-    // ──────────────────────────────────────────────
-    //  DELETE /api/order-items/{orderItem}
-    // ──────────────────────────────────────────────
+    // Remove an item from an order and restore its stock.
     public function destroy(OrderItem $orderItem)
     {
         $order = $orderItem->order;

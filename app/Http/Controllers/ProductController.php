@@ -1,3 +1,4 @@
+
 <?php
 
 namespace App\Http\Controllers;
@@ -8,47 +9,37 @@ use Illuminate\Support\Facades\Storage;
 
 class ProductController extends Controller
 {
-    /**
-     * ✅ NEW — normalize a "zero" discount_price to null before validation.
-     *
-     * ROOT CAUSE OF THE BUG THIS PREVENTS: at some point a product got
-     * saved with discount_price = 0.00 instead of null (likely a form
-     * that submitted "0" rather than leaving the field empty). Because
-     * 0.00 is not null, PHP's `discount_price ?? price` fallback in
-     * OrderController::store() treated it as "this product really is
-     * discounted to $0.00", zeroing out order totals for any order that
-     * included it (see Order #40 — total_amount ended up $0.00).
-     *
-     * The frontend's own hasDiscount() rule (priceUtils.js) already
-     * requires discount_price > 0 to count as a real discount, so 0 was
-     * never meant to be a valid "on sale" value — normalize it to null
-     * at the point of entry so it can never leak into the database again.
-     */
+    // Normalize empty or non-positive discount prices.
     private function normalizeDiscountPrice(Request $request): void
     {
         if ($request->has('discount_price')) {
             $raw = $request->input('discount_price');
+
             if ($raw === '' || $raw === null || (float) $raw <= 0) {
                 $request->merge(['discount_price' => null]);
             }
         }
     }
 
-    /**
-     * Display a listing with Search + Category filter + Pagination from Backend
-     */
+    // List products with search, category filter, and pagination.
     public function index(Request $request)
     {
+        $validated = $request->validate([
+            'per_page' => 'sometimes|integer|min:1|max:100',
+            'search' => 'sometimes|nullable|string|max:255',
+            'category_slug' => 'sometimes|nullable|string|max:255',
+        ]);
+
         try {
-            $perPage      = $request->query('per_page', 15);
-            $search       = $request->query('search', '');
-            $categorySlug = $request->query('category_slug', '');
+            $perPage = $validated['per_page'] ?? 15;
+            $search = $validated['search'] ?? '';
+            $categorySlug = $validated['category_slug'] ?? '';
 
             $products = Product::with('category')
                 ->when($search, function ($query) use ($search) {
                     $query->where(function ($q) use ($search) {
                         $q->where('name', 'LIKE', "%{$search}%")
-                          ->orWhere('description', 'LIKE', "%{$search}%");
+                            ->orWhere('description', 'LIKE', "%{$search}%");
                     });
                 })
                 ->when($categorySlug, function ($query) use ($categorySlug) {
@@ -60,174 +51,200 @@ class ProductController extends Controller
 
             return response()->json([
                 'status' => 'success',
-                'data'   => $products
+                'data' => $products,
             ], 200);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to retrieve products.',
             ], 500);
         }
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
+    // Create a product.
     public function store(Request $request)
     {
+        $this->normalizeDiscountPrice($request);
+
+        $validatedData = $request->validate([
+            'name' => 'required|string|max:255',
+            'slug' => 'required|string|max:255|unique:products,slug',
+            'price' => 'required|numeric|min:0',
+            'discount_price' => 'nullable|numeric|min:0|lt:price',
+            'discount_expires_at' => 'nullable|date',
+            'category_id' => 'required|exists:categories,id',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'description' => 'nullable|string',
+            'stock_quantity' => 'required|integer|min:0',
+            'prep_time' => 'nullable|integer|min:0',
+            'sku' => 'nullable|string|max:255|unique:products,sku',
+            'is_active' => 'sometimes|boolean',
+            'is_featured' => 'sometimes|boolean',
+        ]);
+
+        // Validate the discount against the regular price.
+        if (
+            isset($validatedData['discount_price']) &&
+            (float) $validatedData['discount_price'] >= (float) $validatedData['price']
+        ) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Discount price must be lower than the regular price.',
+            ], 422);
+        }
+
         try {
-            // ✅ FIX: normalize discount_price=0 to null BEFORE validation,
-            // so it's never stored as a false "active discount".
-            $this->normalizeDiscountPrice($request);
-
-            $validatedData = $request->validate([
-                'name'                 => 'required|string|max:255',
-                'slug'                 => 'required|string|max:255|unique:products',
-                'price'                => 'required|numeric|min:0',
-                'discount_price'       => 'nullable|numeric|min:0|lt:price',
-                'discount_expires_at'  => 'nullable|date',
-                'category_id'          => 'required|exists:categories,id',
-                'image'                => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-                'description'          => 'nullable|string',
-                'stock_quantity'       => 'required|integer|min:0',
-                'prep_time'            => 'nullable|integer|min:0',
-                'sku'                  => 'nullable|string|unique:products',
-                'is_active'            => 'boolean',
-                'is_featured'          => 'boolean',
-            ]);
-
             if ($request->hasFile('image')) {
-                $file     = $request->file('image');
-                $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-                $file->storeAs('products', $filename, 'public');
-                $validatedData['image'] = 'products/' . $filename;
+                $path = $request->file('image')->store('products', 'public');
+
+                if ($path === false) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Unable to upload product image.',
+                    ], 500);
+                }
+
+                $validatedData['image'] = $path;
             }
 
             $product = Product::create($validatedData);
 
             return response()->json([
                 'status' => 'success',
-                'data'   => $product
+                'data' => $product,
             ], 201);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to create product.',
             ], 500);
         }
     }
 
-    /**
-     * Display the specified resource.
-     */
+    // Show a product with its category.
     public function show($id)
     {
         $product = Product::with('category')->find($id);
 
         if (!$product) {
             return response()->json([
-                'status'  => 'error',
-                'message' => 'Product not found'
+                'status' => 'error',
+                'message' => 'Product not found',
             ], 404);
         }
 
         return response()->json([
             'status' => 'success',
-            'data'   => $product
+            'data' => $product,
         ], 200);
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
+    // Update product details and image.
     public function update(Request $request, Product $product)
     {
+        $this->normalizeDiscountPrice($request);
+
+        $validatedData = $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'slug' => 'sometimes|required|string|max:255|unique:products,slug,' . $product->id,
+            'price' => 'sometimes|required|numeric|min:0',
+            'discount_price' => 'sometimes|nullable|numeric|min:0',
+            'discount_expires_at' => 'sometimes|nullable|date',
+            'category_id' => 'sometimes|required|exists:categories,id',
+            'image' => 'sometimes|nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+            'description' => 'sometimes|nullable|string',
+            'stock_quantity' => 'sometimes|required|integer|min:0',
+            'prep_time' => 'sometimes|nullable|integer|min:0',
+            'sku' => 'sometimes|nullable|string|max:255|unique:products,sku,' . $product->id,
+            'is_active' => 'sometimes|boolean',
+            'is_featured' => 'sometimes|boolean',
+        ]);
+
+        // Validate against the final product price.
+        $price = $validatedData['price'] ?? $product->price;
+
+        $discountPrice = array_key_exists('discount_price', $validatedData)
+            ? $validatedData['discount_price']
+            : $product->discount_price;
+
+        if (
+            $discountPrice !== null &&
+            (float) $discountPrice >= (float) $price
+        ) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Discount price must be lower than the regular price.',
+            ], 422);
+        }
+
         try {
-            // ✅ FIX: normalize discount_price=0 to null BEFORE validation —
-            // same reasoning as store(). This also covers the case where
-            // an admin edits an existing product and the form re-submits
-            // a stale "0" instead of leaving discount_price blank.
-            $this->normalizeDiscountPrice($request);
-
-            $validatedData = $request->validate([
-                'name'                 => 'sometimes|string|max:255',
-                'slug'                 => 'sometimes|string|max:255|unique:products,slug,' . $product->id,
-                'price'                => 'sometimes|numeric|min:0',
-                'discount_price'       => 'nullable|numeric|min:0|lt:price',
-                'discount_expires_at'  => 'nullable|date',
-                'category_id'          => 'sometimes|exists:categories,id',
-                'image'                => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-                'description'          => 'nullable|string',
-                'stock_quantity'       => 'sometimes|integer|min:0',
-                'prep_time'            => 'nullable|integer|min:0',
-                'sku'                  => 'nullable|string',
-                'is_active'            => 'boolean',
-                'is_featured'          => 'boolean',
-            ]);
-
-            // ✅ Allow explicitly clearing the discount / expiry (empty string from form -> null)
-            // (normalizeDiscountPrice() above already handles discount_price === '' / 0,
-            // but this stays as a defensive fallback in case validated data
-            // still carries an empty string through some other path.)
-            if ($request->has('discount_price') && $request->input('discount_price') === '') {
-                $validatedData['discount_price'] = null;
-            }
-            if ($request->has('discount_expires_at') && $request->input('discount_expires_at') === '') {
-                $validatedData['discount_expires_at'] = null;
-            }
+            $oldImage = $product->image;
+            $newImage = null;
 
             if ($request->hasFile('image')) {
-                if ($product->image) {
-                    Storage::disk('public')->delete($product->image);
+                $newImage = $request->file('image')->store('products', 'public');
+
+                if ($newImage === false) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'Unable to upload product image.',
+                    ], 500);
                 }
-                $file     = $request->file('image');
-                $filename = time() . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
-                $file->storeAs('products', $filename, 'public');
-                $validatedData['image'] = 'products/' . $filename;
+
+                $validatedData['image'] = $newImage;
             }
 
             $product->update($validatedData);
 
+            // Remove the previous image after a successful update.
+            if ($newImage && $oldImage && $oldImage !== $newImage) {
+                Storage::disk('public')->delete($oldImage);
+            }
+
             return response()->json([
-                'status'  => 'success',
+                'status' => 'success',
                 'message' => 'Product updated successfully',
-                'data'    => $product->fresh('category')
+                'data' => $product->fresh('category'),
             ], 200);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to update product.',
             ], 500);
         }
     }
 
-    /**
-     * Soft Delete
-     */
+    // Soft delete a product.
     public function destroy(Product $product)
     {
         try {
             $product->delete();
 
             return response()->json([
-                'status'  => 'success',
-                'message' => 'Product moved to trash'
+                'status' => 'success',
+                'message' => 'Product moved to trash',
             ], 200);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to delete product.',
             ], 500);
         }
     }
 
-    /**
-     * Restore trashed product.
-     */
+    // Restore a trashed product.
     public function restore($id)
     {
         try {
@@ -235,29 +252,29 @@ class ProductController extends Controller
 
             if (!$product) {
                 return response()->json([
-                    'status'  => 'error',
-                    'message' => 'Product not found'
+                    'status' => 'error',
+                    'message' => 'Product not found',
                 ], 404);
             }
 
             $product->restore();
 
             return response()->json([
-                'status'  => 'success',
-                'message' => 'Product restored'
+                'status' => 'success',
+                'message' => 'Product restored',
             ], 200);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to restore product.',
             ], 500);
         }
     }
 
-    /**
-     * Force Delete permanently.
-     */
+    // Permanently delete a product and its image.
     public function forceDelete($id)
     {
         try {
@@ -265,47 +282,53 @@ class ProductController extends Controller
 
             if (!$product) {
                 return response()->json([
-                    'status'  => 'error',
-                    'message' => 'Product not found'
+                    'status' => 'error',
+                    'message' => 'Product not found',
                 ], 404);
             }
 
-            if ($product->image) {
-                Storage::disk('public')->delete($product->image);
-            }
+            $image = $product->image;
 
             $product->forceDelete();
 
+            if ($image) {
+                Storage::disk('public')->delete($image);
+            }
+
             return response()->json([
-                'status'  => 'success',
-                'message' => 'Product permanently deleted'
+                'status' => 'success',
+                'message' => 'Product permanently deleted',
             ], 200);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to permanently delete product.',
             ], 500);
         }
     }
 
-    /**
-     * Get all trashed products.
-     */
+    // List trashed products.
     public function getTrashedProducts()
     {
         try {
-            $trashedProducts = Product::onlyTrashed()->with('category')->get();
+            $trashedProducts = Product::onlyTrashed()
+                ->with('category')
+                ->get();
 
             return response()->json([
                 'status' => 'success',
-                'data'   => $trashedProducts
+                'data' => $trashedProducts,
             ], 200);
 
         } catch (\Throwable $th) {
+            report($th);
+
             return response()->json([
-                'status'  => 'error',
-                'message' => $th->getMessage()
+                'status' => 'error',
+                'message' => 'Unable to retrieve trashed products.',
             ], 500);
         }
     }

@@ -13,8 +13,8 @@ return new class extends Migration
 {
     Schema::create('tables', function (Blueprint $table) {
         $table->id();
-        $table->string('name'); // ឈ្មោះតុ ដូចជា "តុលេខ ១"
-        $table->integer('capacity'); // ចំនួនមនុស្ស
+        $table->string('name'); // Table name, such as "Table No. 1"
+        $table->integer('capacity'); 
         $table->string('status')->default('available'); // available, occupied, reserved
         $table->timestamps();
     });

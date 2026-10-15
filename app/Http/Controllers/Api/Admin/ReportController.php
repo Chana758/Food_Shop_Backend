@@ -14,19 +14,13 @@ use Illuminate\Support\Facades\Schema;
 
 class ReportController extends Controller
 {
-    /**
-     *  NEW — the order_items line-total column has been referenced under
-     * two different names across this codebase (OrderController::store()
-     * inserts `subtotal`, but earlier report code assumed `total_price`).
-     * Resolving it once here — via Schema::hasColumn() — means this file
-     * keeps working regardless of which one actually exists in the DB,
-     * instead of silently returning zero rows from a bad column name.
-     */
+    // order_items line-total column: 'subtotal' or 'total_price' (varies by DB)
     private function lineTotalColumn(): string
     {
         return Schema::hasColumn('order_items', 'subtotal') ? 'subtotal' : 'total_price';
     }
 
+    // Report stats for the selected period
     public function stats(Request $request)
     {
         try {
@@ -65,6 +59,7 @@ class ReportController extends Controller
         }
     }
 
+    // Current and previous date ranges
     private function getDateRanges($period)
     {
         $now = Carbon::now();
@@ -103,6 +98,7 @@ class ReportController extends Controller
         return [$currentStart, $currentEnd, $prevStart, $prevEnd];
     }
 
+    // Revenue, orders, customers and avg order vs previous period
     private function calculateStats($currentStart, $currentEnd, $prevStart, $prevEnd)
     {
         $currentRevenue = Order::whereBetween('created_at', [$currentStart, $currentEnd])
@@ -143,6 +139,7 @@ class ReportController extends Controller
         ];
     }
 
+    // Absolute % change (100 if previous is 0 and current > 0)
     private function calculatePercentageChange($current, $previous)
     {
         if ($previous == 0) {
@@ -151,13 +148,7 @@ class ReportController extends Controller
         return round(abs((($current - $previous) / $previous) * 100), 1);
     }
 
-    /**
-     * ✅ FIXED FOR POSTGRESQL
-     * Was: DATE_FORMAT(created_at, '%H:00')  ← MySQL-only, throws
-     *      "function date_format does not exist" on Postgres, which
-     *      caused every single Report load to 500 silently.
-     * Now: TO_CHAR(created_at, 'HH24:00')    ← PostgreSQL equivalent
-     */
+    // Sales grouped by hour/day/month (PostgreSQL TO_CHAR)
     private function getMonthlySalesData($period, $start, $end)
     {
         $query = Order::whereBetween('created_at', [$start, $end])
@@ -200,6 +191,7 @@ class ReportController extends Controller
         ])->values();
     }
 
+    // Category share of sales (%)
     private function getCategorySalesData($start, $end)
     {
         $col    = $this->lineTotalColumn(); // 'subtotal' or 'total_price'
@@ -229,6 +221,7 @@ class ReportController extends Controller
         })->values()->toArray();
     }
 
+    // Top 5 products by revenue
     private function getTopProductsData($start, $end)
     {
         $col = $this->lineTotalColumn();
@@ -258,6 +251,7 @@ class ReportController extends Controller
         ])->values()->toArray();
     }
 
+    // Latest 6 orders
     private function getRecentTransactionsData()
     {
         $orders = Order::with('user')->latest()->limit(6)->get();

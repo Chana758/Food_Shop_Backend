@@ -10,9 +10,9 @@ class CheckBlockedStatus
 {
     public function handle(Request $request, Closure $next): Response
     {
-        // ឆែកមើល User ដែលកំពុង Login
+        // Check the currently logged-in user
         if (auth()->check() && auth()->user()->status === 'blocked') {
-            // បើ Block គឺកាត់ផ្តាច់ភ្លាមៗ
+            // If blocked, it is cut off immediately.
             return response()->json([
                 'status'  => 'error',
                 'message' => 'Your account has been blocked by admin.'

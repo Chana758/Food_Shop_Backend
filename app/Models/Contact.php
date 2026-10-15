@@ -37,22 +37,23 @@ class Contact extends Model
         'replied_at' => 'datetime',
     ];
 
-    // ── Relationships ────────────────────────────────────────────────
+    // Relationships     
 
-    // Nullable — guests (not logged in) can also submit the contact form,
-    // matching the migration's nullable()->nullOnDelete() on user_id.
+    /** Sender account (null for guests). */
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
+    /** Admin who replied. */
     public function repliedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'replied_by');
     }
 
-    // ── Scopes ───────────────────────────────────────────────────────
+    // Scopes
 
+    /** Only unread messages. */
     public function scopeUnread($query)
     {
         return $query->where('status', self::STATUS_UNREAD);

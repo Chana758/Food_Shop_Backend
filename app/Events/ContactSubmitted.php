@@ -9,14 +9,6 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-/**
- * Broadcast a new contact message to the admin dashboard in real time.
- *
- * Reuses the existing 'orders' channel and 'order.status.changed' event
- * name so that AdminDashboard.jsx's useEcho(null, { onAnyChange }) picks
- * it up without any frontend changes — it already refetches the whole
- * dashboard (including contact stats) on any event on that channel.
- */
 class ContactSubmitted implements ShouldBroadcast
 {
     use Dispatchable, InteractsWithSockets, SerializesModels;
@@ -26,7 +18,7 @@ class ContactSubmitted implements ShouldBroadcast
     }
 
     /**
-     * The channel this event broadcasts on.
+     * Broadcast on the existing orders channel.
      */
     public function broadcastOn(): Channel
     {
@@ -34,21 +26,14 @@ class ContactSubmitted implements ShouldBroadcast
     }
 
     /**
-     * The event name the frontend listens for.
-     * Kept identical to the order status event so no new Echo listener
-     * is needed — AdminDashboard's onAnyChange already fires on this.
+     * Reuse the existing frontend event listener.
      */
     public function broadcastAs(): string
     {
         return 'order.status.changed';
     }
 
-    /**
-     * Data sent to the frontend.
-     * `type: 'contact'` lets any listener distinguish this from a real
-     * order event if it ever needs to; useEcho's dashboard-wide mode
-     * ignores it and just refetches, which is all we need here.
-     */
+    // Send the minimal payload required by the dashboard.
     public function broadcastWith(): array
     {
         return [

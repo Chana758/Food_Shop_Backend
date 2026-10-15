@@ -22,10 +22,8 @@ use App\Http\Controllers\Api\Admin\ReportController;
 use App\Http\Controllers\API\BackupController;
 use App\Http\Controllers\Api\Admin\SettingController;
 use App\Http\Controllers\PricingController;
-// use Illuminate\Support\Facades\DB;
-// ======================================
-// PUBLIC
-// ======================================
+
+// ── Public ──
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login',    [AuthController::class, 'login']);
 
@@ -36,43 +34,40 @@ Route::get('/tables',        [TableController::class,    'index']);
 Route::get('/pricing',       [PricingController::class,  'index']);
 Route::post('/contacts',     [ContactController::class,  'store']);
 
-// Public review listing — approved only, filterable by ?product_id=
+// Approved reviews only; filter with ?product_id=
 Route::get('/reviews', [ReviewController::class, 'index']);
 
-// Keep-alive: ping from UptimeRobot (Ping the DB to prevent Supabase from pausing)
+// UptimeRobot ping so Supabase doesn't pause the DB
 Route::get('/ping', function () {
     DB::select('select 1');
     return response()->json(['status' => 'ok']);
 });
-// ======================================
-// PROTECTED — Authenticated users
-// ======================================
+
+// ── Authenticated users ──
 Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(function () {
 
     Route::get('/user',    fn(Request $r) => $r->user());
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::get('/search',  [SearchController::class, 'index']);
 
-    // ── Orders ────
+    // Orders
     Route::get('/orders',                 [OrderController::class, 'myOrders']);
     Route::post('/orders',                [OrderController::class, 'store']);
     Route::get('/orders/{order}',         [OrderController::class, 'show']);
     Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel']);
     Route::post('/orders/khqr',           [OrderController::class, 'storeIfKhqrPaid']);
 
-    // ── Payments ─────
+    // Payments
     Route::post('/payments',                          [PaymentController::class, 'store']);
     Route::get('/payments',                           [PaymentController::class, 'myPayments']);
 
-    // Own, tighter limiter for check-status specifically (Bakong API calls
-    // upstream — keep this separate and stricter, it stacks on top of the
-    // group-level 120/min above).
+    // Stricter limit: calls the Bakong API (stacks on the group's 120/min)
     Route::post('/payments/{payment}/check-status',    [PaymentController::class, 'checkStatus'])
         ->middleware('throttle:20,1');
 
     Route::post('/payments/{payment}/upload-receipt', [PaymentController::class, 'uploadReceipt']);
 
-    // ── Favorites ──────
+    // Favorites
     Route::prefix('favorites')->group(function () {
         Route::get('/',                  [FavoriteController::class, 'index']);
         Route::post('/',                 [FavoriteController::class, 'store']);
@@ -80,7 +75,7 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
         Route::get('/check/{productId}', [FavoriteController::class, 'check']);
     });
 
-    // ── Reservations (customer) ─────
+    // Reservations (own)
     Route::prefix('reservations')->group(function () {
         Route::get('/',             [ReservationController::class, 'index']);
         Route::post('/',            [ReservationController::class, 'store']);
@@ -89,14 +84,14 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
         Route::post('/{id}/cancel', [ReservationController::class, 'cancel']);
     });
 
-    // ── Reviews (customer write) ──────
+    // Reviews (write)
     Route::prefix('reviews')->group(function () {
         Route::post('/',        [ReviewController::class, 'store']);
         Route::put('/{id}',     [ReviewController::class, 'update']);
         Route::delete('/{id}',  [ReviewController::class, 'destroy']);
     });
 
-    // ── Notifications (customer) ────────
+    // Notifications (own)
     Route::prefix('notifications')->group(function () {
         Route::get('/',             [NotificationController::class, 'index']);
         Route::get('/{id}',         [NotificationController::class, 'show']);
@@ -105,54 +100,53 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
         Route::delete('/{id}',      [NotificationController::class, 'destroy']);
     });
 
-    // ==========================================
-    // ADMIN + STAFF — read-only access (GET)
-    // ==========================================
+    // ── Admin + Staff ──
     Route::middleware('role:admin,staff')->group(function () {
 
         Route::get('/admin/dashboard-stats',      [DashboardController::class, 'stats']);
         Route::get('/admin/dashboard-stats/ping', [DashboardController::class, 'ping']);
 
-        // Orders — view only
+        // Orders (view)
         Route::prefix('admin/orders')->group(function () {
             Route::get('/stats',         [OrderController::class,     'stats']);
             Route::get('/',              [OrderController::class,     'index']);
             Route::get('/{order}/items', [OrderItemController::class, 'index']);
         });
 
-        // Payments — view only
+        // Payments (view)
         Route::prefix('admin/payments')->group(function () {
             Route::get('/stats',     [PaymentController::class, 'stats']);
             Route::get('/',          [PaymentController::class, 'index']);
             Route::get('/{payment}', [PaymentController::class, 'show']);
         });
 
-        // Favorites — view only  
+        // Favorites (view)
         Route::get('/admin/favorites', [FavoriteController::class, 'adminGetAllFavorites']);
 
-        // Reservations — view only
+        // Reservations (view)
         Route::prefix('admin/reservations')->group(function () {
-            Route::get('/stats', [ReservationController::class, 'stats']); 
+            Route::get('/stats', [ReservationController::class, 'stats']);
             Route::get('/',     [ReservationController::class, 'index']);
             Route::get('/{id}', [ReservationController::class, 'show']);
         });
 
-        // Contacts — view only
+        // Contacts (view)
         Route::prefix('admin/contacts')->group(function () {
             Route::get('/stats', [ContactController::class, 'stats']);
             Route::get('/',     [ContactController::class, 'index']);
             Route::get('/{id}', [ContactController::class, 'show']);
         });
 
-        // Reviews — view only
+        // Reviews (view)
         Route::prefix('admin/reviews')->group(function () {
             Route::get('/',     [ReviewController::class, 'index']);
             Route::get('/{id}', [ReviewController::class, 'show']);
         });
 
-        // Reports — view statistics and analytics
+        // Reports
         Route::get('/admin/reports/stats', [ReportController::class, 'stats']);
 
+        // Settings (view + update)
         Route::prefix('admin/settings')->group(function () {
             Route::get('/', [SettingController::class, 'index']);
             Route::put('/', [SettingController::class, 'update']);
@@ -160,9 +154,7 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
 
     });
 
-    // =========================
-    // ADMIN ONLY — full management
-    // =========================
+    // ── Admin only ──
     Route::middleware('role:admin')->group(function () {
 
         // Categories
@@ -194,7 +186,7 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
             Route::delete('/{table}', [TableController::class, 'destroy']);
         });
 
-        // Orders — write actions
+        // Orders (manage)
         Route::prefix('admin/orders')->group(function () {
             Route::put('/{order}',                 [OrderController::class,     'update']);
             Route::delete('/{order}',              [OrderController::class,     'destroy']);
@@ -203,13 +195,13 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
             Route::post('/{order}/delivery-status', [OrderController::class,     'updateDeliveryStatus']);
         });
 
-        // Order Items
+        // Order items
         Route::prefix('order-items')->group(function () {
             Route::put('/{orderItem}',    [OrderItemController::class, 'update']);
             Route::delete('/{orderItem}', [OrderItemController::class, 'destroy']);
         });
 
-        // Payments — write actions
+        // Payments (manage)
         Route::prefix('admin/payments')->group(function () {
             Route::put('/{payment}/confirm', [PaymentController::class, 'confirm']);
             Route::put('/{payment}/reject',  [PaymentController::class, 'reject']);
@@ -217,7 +209,7 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
             Route::delete('/{payment}',      [PaymentController::class, 'destroy']);
         });
 
-        // Favorites — write
+        // Favorites (delete)
         Route::delete('/admin/favorites/{id}', [FavoriteController::class, 'adminDestroy']);
 
         // Customers
@@ -245,7 +237,7 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
             Route::delete('/{rider}', [RiderController::class, 'destroy']);
         });
 
-        // Reservations — write actions
+        // Reservations (manage)
         Route::prefix('admin/reservations')->group(function () {
             Route::put('/{id}/confirm',  [ReservationController::class, 'confirm']);
             Route::put('/{id}/reject',   [ReservationController::class, 'reject']);
@@ -253,28 +245,28 @@ Route::middleware(['auth:sanctum', 'check.blocked', 'throttle:120,1'])->group(fu
             Route::delete('/{id}',       [ReservationController::class, 'destroy']);
         });
 
-        // Contacts — write actions
+        // Contacts (manage)
         Route::prefix('admin/contacts')->group(function () {
             Route::post('/{id}/reply', [ContactController::class, 'reply']);
             Route::delete('/{id}',     [ContactController::class, 'destroy']);
         });
 
-        // Reviews — write actions
+        // Reviews (manage)
         Route::prefix('admin/reviews')->group(function () {
             Route::put('/{id}/status', [ReviewController::class, 'updateStatus']);
             Route::delete('/{id}',     [ReviewController::class, 'destroy']);
         });
 
-        // Notifications — admin sends manual notifications
+        // Send manual notifications
         Route::prefix('admin/notifications')->group(function () {
             Route::post('/', [NotificationController::class, 'store']);
         });
 
-        // Backups — database backup management
+        // Database backups
         Route::prefix('admin/backups')->group(function () {
             Route::get('/',                    [BackupController::class, 'index']);
             Route::post('/',                   [BackupController::class, 'store']);
-            Route::get('/{fileName}/download', [BackupController::class, 'download']); 
+            Route::get('/{fileName}/download', [BackupController::class, 'download']);
             Route::delete('/{fileName}',       [BackupController::class, 'destroy']);
         });
     });

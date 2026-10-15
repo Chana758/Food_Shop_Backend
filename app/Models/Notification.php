@@ -10,10 +10,7 @@ class Notification extends Model
 {
     use HasFactory;
 
-    // Matches the migration comment: 'order', 'payment', 'reservation',
-    // 'promo', etc. Kept as constants for the common cases this app
-    // already generates notifications for; 'type' itself is just a plain
-    // string column, so new types can be added without a migration.
+    // Common types. 'type' is a plain string, so new ones need no migration.
     public const TYPE_ORDER       = 'order';
     public const TYPE_PAYMENT     = 'payment';
     public const TYPE_RESERVATION = 'reservation';
@@ -36,19 +33,15 @@ class Notification extends Model
         'read_at' => 'datetime',
     ];
 
-    // ── Relationships ────────────────────────────────────────────────
+    //  Relationships 
 
+    /** Notification owner. */
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
     }
 
-    // Manual "polymorphic-style" resolver — the migration uses plain
-    // reference_id/reference_type columns rather than Laravel's native
-    // morphTo() columns (which would be {column}_id/{column}_type), so
-    // this helper resolves the related model by hand instead of using
-    // morphTo(). Returns null if reference_type/reference_id is missing
-    // or the target model class doesn't exist.
+    /** Load the related Order / Payment / Reservation by hand (not morphTo). Null if missing. */
     public function reference(): ?Model
     {
         if (! $this->reference_type || ! $this->reference_id) {
@@ -69,8 +62,9 @@ class Notification extends Model
         return $modelClass::find($this->reference_id);
     }
 
-    // ── Mutators ─────────────────────────────────────────────────────
+    // Mutators 
 
+    /** Mark as read (does nothing if already read). */
     public function markAsRead(): void
     {
         if (! $this->is_read) {
@@ -81,13 +75,15 @@ class Notification extends Model
         }
     }
 
-    // ── Scopes ───────────────────────────────────────────────────────
+    // Scopes 
 
+    /** Only unread notifications. */
     public function scopeUnread($query)
     {
         return $query->where('is_read', false);
     }
 
+    /** Only notifications of the given type. */
     public function scopeOfType($query, string $type)
     {
         return $query->where('type', $type);

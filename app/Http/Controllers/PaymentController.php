@@ -14,10 +14,9 @@ use KHQR\BakongKHQR;
 
 class PaymentController extends Controller
 {
-    // ──────────────────────────────────────────────
-    //  ADMIN ENDPOINTS
-    // ──────────────────────────────────────────────
+    // Admin endpoints
 
+    // Admin: list payments with filters, newest first.
     public function index(Request $request)
     {
         try {
@@ -37,6 +36,7 @@ class PaymentController extends Controller
         }
     }
 
+    // Admin: show one payment with its order.
     public function show(Payment $payment)
     {
         return response()->json([
@@ -45,13 +45,7 @@ class PaymentController extends Controller
         ], 200);
     }
 
-    /**
-     * PUT /api/admin/payments/{payment}/confirm
-     *
-     * Added an $alreadyPaid guard, mirroring checkStatus() below, so a
-     * double-click / retry never re-broadcasts OrderPaid for a payment
-     * that was already confirmed.
-     */
+    // Admin: confirm a pending payment and mark the order paid (safe against double confirm).
     public function confirm(Payment $payment)
     {
         if ($payment->status !== 'pending') {
@@ -93,6 +87,7 @@ class PaymentController extends Controller
         }
     }
 
+    // Admin: reject a pending payment and cancel the order.
     public function reject(Payment $payment)
     {
         if ($payment->status !== 'pending') {
@@ -123,6 +118,7 @@ class PaymentController extends Controller
         }
     }
 
+    // Admin: refund a paid payment and mark the order refunded.
     public function refund(Payment $payment)
     {
         if ($payment->status !== 'paid') {
@@ -153,6 +149,7 @@ class PaymentController extends Controller
         }
     }
 
+    // Admin: delete an unpaid payment and its receipt image.
     public function destroy(Payment $payment)
     {
         if ($payment->status === 'paid') {
@@ -175,59 +172,9 @@ class PaymentController extends Controller
         }
     }
 
-    // ──────────────────────────────────────────────
-    //  CUSTOMER / STAFF ENDPOINTS
-    // ──────────────────────────────────────────────
+    // Customer / staff endpoints
 
-    /**
-     * POST /api/payments
-     *
-     * Ownership guard (IDOR fix): the order must belong to the requester,
-     * unless they're admin/staff (who legitimately create payments on
-     * behalf of walk-in / POS customers).
-     *
-     * Wraps file upload + Payment::create() in DB::transaction so a
-     * failed create() doesn't leave an orphaned file in storage.
-     *
-     * Any old PENDING payment for the same order is voided (status ->
-     * 'rejected') before a fresh one is created, so "Generate New QR"
-     * retries never get stuck behind a stale row — only a PAID payment
-     * blocks a new one.
-     *
-     * ✅ NEW (Bug 2 fix): `paid_now` — lets a staff/admin caller mark a
-     * cash or card payment as 'paid' immediately at creation time,
-     * instead of always creating it as 'pending'.
-     *
-     * ROOT CAUSE THIS FIXES: this endpoint always created Payment rows
-     * as status='pending', which is correct for the storefront's Cash-
-     * on-Delivery flow (Checkout.jsx) — the rider hasn't collected
-     * money yet. But ManagementSaler.jsx (the in-store POS) calls this
-     * SAME endpoint for Cash and Card sales, where the cashier has
-     * ALREADY physically collected the money at the register the
-     * instant the sale is rung up. Because every POS cash/card payment
-     * stayed 'pending' forever (nothing in the POS flow ever called
-     * confirm()), two things broke:
-     *   1. order.status never advanced to 'paid', so those sales never
-     *      counted in Order::stats()/PaymentController::stats() revenue
-     *      totals (both filter on status = 'paid').
-     *   2. Every single POS cash/card sale piled up in the admin
-     *      "Payment Management" pending queue, indistinguishable from a
-     *      KHQR receipt that genuinely needs a human to verify it —
-     *      requiring an admin to manually click "Confirm" on every POS
-     *      sale, which isn't viable at register speed.
-     *
-     * Restricted to admin/staff AND method cash/card only — KHQR must
-     * always go through Bakong verification (checkStatus/
-     * storeIfKhqrPaid), never a client-asserted "trust me, it's paid"
-     * flag, or anyone could fake a paid transaction.
-     *
-     * `amount` is copied straight from `order.total_amount`, which (as
-     * of OrderController::store()'s fix) now correctly includes both
-     * the delivery fee for delivery orders AND tax where enabled. This
-     * field is what checkStatus() below compares against Bakong's
-     * reported paid amount — keeping it accurate here is what makes
-     * that verification meaningful at all.
-     */
+    // Create a payment for an order (staff may use paid_now for cash/card; KHQR always via Bakong).
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -235,7 +182,7 @@ class PaymentController extends Controller
             'method'          => 'required|in:cash,khqr,card',
             'transaction_ref' => 'nullable|string|unique:payments,transaction_ref',
             'receipt_image'   => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
-            'paid_now'        => 'sometimes|boolean', // ✅ NEW
+            'paid_now'        => 'sometimes|boolean',
         ]);
 
         $receiptPath = null;
@@ -243,7 +190,7 @@ class PaymentController extends Controller
         try {
             $order = Order::findOrFail($validated['order_id']);
 
-            // Ownership guard (IDOR fix).
+            // Ownership guard
             $user = auth()->user();
             if ($order->user_id !== $user->id && ! in_array($user->role, ['admin', 'staff'])) {
                 return response()->json([
@@ -263,17 +210,12 @@ class PaymentController extends Controller
                 ], 422);
             }
 
-            // Void stale pending payments instead of blocking retries.
-            // This intentionally happens OUTSIDE the create transaction below —
-            // even if create() subsequently fails, we don't want to resurrect
-            // a stale pending row as "the" payment for this order.
+            // Void stale pending payments (outside the transaction on purpose)
             Payment::where('order_id', $order->id)
                 ->where('status', 'pending')
                 ->update(['status' => 'rejected']);
 
-            // ✅ NEW: only a staff/admin can mark a payment paid at creation
-            // time, and only for cash/card — money physically collected at
-            // the register. KHQR must always go through Bakong verification.
+            // Only staff/admin, cash/card only; KHQR must go through Bakong
             $markPaidNow = in_array($user->role, ['admin', 'staff'])
                 && ($validated['paid_now'] ?? false)
                 && in_array($validated['method'], ['cash', 'card']);
@@ -286,11 +228,7 @@ class PaymentController extends Controller
                 $payment = Payment::create([
                     'order_id'        => $order->id,
                     'user_id'         => auth()->id(),
-                    // order.total_amount already reflects any staff/POS
-                    // discount applied at order-creation time, tax (see
-                    // OrderController::store()), AND the delivery fee for
-                    // delivery orders — so this always matches what the
-                    // customer is actually shown/charged.
+                    // total_amount already includes discount, tax and delivery fee
                     'amount'          => $order->total_amount,
                     'method'          => $validated['method'],
                     'status'          => $markPaidNow ? 'paid' : 'pending',
@@ -317,8 +255,7 @@ class PaymentController extends Controller
                 'data'   => $payment->load('order', 'user'),
             ], 201);
         } catch (\Throwable $th) {
-            // if Payment::create() fails after a file was already
-            // uploaded, delete it so it doesn't linger as an orphan in storage.
+            // Delete orphaned upload
             if ($receiptPath) {
                 Storage::disk('public')->delete($receiptPath);
             }
@@ -327,28 +264,7 @@ class PaymentController extends Controller
         }
     }
 
-    /**
-     * POST /api/payments/{payment}/check-status
-     *
-     * A KHQR "dynamic QR" is generated entirely CLIENT-SIDE (see
-     * utils/khqr.js — `KHQR.generate()` runs in the browser, no server
-     * round-trip to Bakong at all). Bakong's `checkTransactionByMD5`
-     * endpoint returns `responseCode: 0` simply to mean "the API request
-     * itself was processed successfully" — it returns that same code 0
-     * whether or not a matching PAID transaction actually exists yet.
-     * Whether a real payment was found is indicated by the `data` field:
-     * null/empty means "nothing paid yet", a populated object means
-     * "found it".
-     *
-     * Only treat it as paid when Bakong's `data` is actually present
-     * AND its reported amount matches what we expect (`payments.amount`).
-     * The amount check additionally guards against a stale/reused MD5
-     * ever confirming the wrong order.
-     *
-     * Diagnostic logging added around every branch of this method so
-     * that a "customer paid but system never saw it" report can be
-     * root-caused from storage/logs/laravel.log alone.
-     */
+    // Check KHQR status with Bakong (paid only if Bakong data exists and amount matches).
     public function checkStatus(Payment $payment)
     {
         if ($payment->user_id !== auth()->id() && !in_array(auth()->user()->role, ['admin', 'staff'])) {
@@ -377,15 +293,10 @@ class PaymentController extends Controller
 
             $responseCode = $result->responseCode ?? ($result->status->code ?? null);
 
-            // `responseCode === 0` only means the API call succeeded — it
-            // does NOT mean a paid transaction was found. Require an
-            // actual transaction payload before trusting it.
+            // responseCode 0 only means the API call succeeded; require data
             $transactionData = $result->data ?? null;
 
-            // Extra safety: confirm the amount Bakong reports actually
-            // matches this payment, so a stale/reused MD5 (or a QR
-            // regenerated for a different, unrelated order sharing an
-            // amount) can never confirm the wrong payment.
+            // Amount must match, to avoid confirming the wrong payment
             $amountMatches = $transactionData
                 && isset($transactionData->amount)
                 && abs((float) $transactionData->amount - (float) $payment->amount) < 0.01;
@@ -452,6 +363,7 @@ class PaymentController extends Controller
         }
     }
 
+    // List my payments, newest first.
     public function myPayments(Request $request)
     {
         try {
@@ -468,6 +380,7 @@ class PaymentController extends Controller
         }
     }
 
+    // Upload a receipt image for my pending payment.
     public function uploadReceipt(Request $request, Payment $payment)
     {
         if ($payment->user_id !== auth()->id()) {
@@ -505,6 +418,7 @@ class PaymentController extends Controller
     }
 
 
+    // Admin: revenue, refunds and counts by status, method, today and month.
     public function stats()
     {
         try {
@@ -518,12 +432,7 @@ class PaymentController extends Controller
                 'by_method' => Payment::selectRaw('method, COUNT(*) as count, SUM(amount) as total')
                     ->where('status', 'paid')->groupBy('method')->get(),
 
-                // NOTE: still excludes cash — cash legitimately stays
-                // 'pending' until an admin/rider confirms delivery for
-                // COD orders. With the paid_now fix, POS cash/card sales
-                // no longer sit here at all (they're created already
-                // 'paid'), so this count now accurately reflects only
-                // KHQR/card payments genuinely awaiting human review.
+                // Excludes cash: COD stays pending until confirmed
                 'pending_confirmation_count' => Payment::where('status', 'pending')
                     ->where('method', '!=', 'cash')
                     ->count(),

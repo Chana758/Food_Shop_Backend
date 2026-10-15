@@ -33,7 +33,7 @@ class Review extends Model
         'rating' => 'integer',
     ];
 
-    // ── Relationships ────────────────────────────────────────────────
+    //  Relationships 
 
     public function user(): BelongsTo
     {
@@ -52,7 +52,7 @@ class Review extends Model
         return $this->belongsTo(Order::class);
     }
 
-    // ── Accessors ────────────────────────────────────────────────────
+    //  Accessors 
 
     // Convenience flag for the frontend — true only when order_id is set,
     // matching the migration comment "identify verified purchases".
@@ -61,7 +61,7 @@ class Review extends Model
         return ! is_null($this->order_id);
     }
 
-    // ── Scopes ───────────────────────────────────────────────────────
+    //  Scopes 
 
     public function scopeApproved($query)
     {

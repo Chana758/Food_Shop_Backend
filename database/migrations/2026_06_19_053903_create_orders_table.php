@@ -14,7 +14,7 @@ return new class extends Migration
         Schema::create('orders', function (Blueprint $table) {
             $table->id();
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
-            $table->foreignId('table_id')->nullable()->constrained()->onDelete('set null'); // បើលុបតុ មិនឱ្យលុប Order ទេ
+            $table->foreignId('table_id')->nullable()->constrained()->onDelete('set null'); 
             $table->decimal('total_amount', 10, 2);
             $table->string('status')->default('pending'); // pending, cooking, served, paid
             $table->string('order_type')->default('dine-in'); // dine-in, takeaway

@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 class PricingController extends Controller
 {
     /**
-     * GET /api/pricing
      * Public endpoint — Cart.jsx needs this before login too.
      */
     public function index()

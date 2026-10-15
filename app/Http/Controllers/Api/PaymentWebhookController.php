@@ -12,10 +12,12 @@ class PaymentWebhookController extends Controller
         protected PaymentService $paymentService
     ) {}
 
+    /** Receive a payment callback, then verify and process it by transaction_id. */
     public function handle(Request $request)
     {
         $transactionId = $request->input('transaction_id');
 
+        // Reject callbacks without a transaction id
         if (!$transactionId) {
             return response()->json([
                 'message' => 'Invalid Request',

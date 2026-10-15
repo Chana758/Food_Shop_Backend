@@ -17,11 +17,12 @@ class CategoryController extends Controller
             $perPage = $request->query('per_page', 15);
             $search  = $request->query('search', '');
 
-            $categories = Category::when($search, function ($query) use ($search) {
-                    $query->where('name', 'LIKE', "%{$search}%")
-                          ->orWhere('description', 'LIKE', "%{$search}%");
-                })
-                ->paginate($perPage);
+            $categories = Category::query()
+            ->when($search, function ($query) use ($search) {
+                $query->where('name', 'LIKE', "%{$search}%")
+                    ->orWhere('description', 'LIKE', "%{$search}%");
+            })
+            ->paginate($perPage);
 
             return response()->json([
                 'status' => 'success',

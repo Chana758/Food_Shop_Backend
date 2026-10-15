@@ -10,17 +10,10 @@ use Illuminate\Support\Facades\Log;
 
 class ReviewController extends Controller
 {
-    /**
-     * ASSUMPTION: adjust these to match your actual Order status values
-     * (check App\Models\Order for its real STATUS_* constants / column
-     * values — e.g. it may be 'delivered', 'served', 'completed', etc.)
-     */
+    /** Order statuses that count as a verified purchase (match your Order model). */
     private const PURCHASE_VERIFIED_STATUSES = ['completed', 'delivered', 'served'];
 
-    /**
-     * GET /api/reviews  (public)
-     * List approved reviews, optionally filtered by product_id.
-     */
+    /** List approved reviews (public). Optional ?product_id= filter. */
     public function index(Request $request)
     {
         try {
@@ -38,16 +31,7 @@ class ReviewController extends Controller
         }
     }
 
-    /**
-     * GET /api/reviews/my  ✅ NEW
-     * Authenticated customer: their own review history, any status,
-     * across all products.
-     *
-     * FIX: this route and method did not exist at all, even though the
-     * frontend's reviewService.getMyReviews() called /reviews/my. It was
-     * silently 404ing (or matching nothing, since /reviews/{id} is only
-     * defined for PUT/DELETE, not GET).
-     */
+    /** List my reviews, any status. */
     public function myReviews(Request $request)
     {
         try {
@@ -64,10 +48,7 @@ class ReviewController extends Controller
         }
     }
 
-    /**
-     * GET /api/admin/reviews/{id}
-     * Admin/staff view a single review with full relations.
-     */
+    /** Admin: show one review with its user, product and order. */
     public function show($id)
     {
         try {
@@ -82,22 +63,7 @@ class ReviewController extends Controller
         }
     }
 
-    /**
-     * POST /api/reviews
-     * Authenticated customer submits a review.
-     *
-     * FIX (new): previously `order_id` was only checked with
-     * `exists:orders,id` — nothing stopped a user from passing someone
-     * else's order id, an order that didn't contain this product, or an
-     * order that was never actually completed, to fake a "verified"
-     * review. This now enforces:
-     *   1. the order belongs to the authenticated user
-     *   2. the order actually contains this product
-     *   3. the order is in a completed/delivered state
-     * If order_id is omitted, the review is simply not purchase-verified
-     * (still allowed, same as before — remove that branch if you want to
-     * require order_id on every review).
-     */
+    /** Submit a review (if order_id is sent, it must be my completed order containing the product). */
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -135,8 +101,7 @@ class ReviewController extends Controller
             }
         }
 
-        // Explicit duplicate check gives a readable 409 instead of a
-        // raw SQL unique-constraint violation bubbling up as a 500.
+        // Return a clean 409 instead of a SQL unique-key 500
         $exists = Review::where('user_id', Auth::id())
             ->where('product_id', $validated['product_id'])
             ->where('order_id', $validated['order_id'] ?? null)
@@ -156,7 +121,7 @@ class ReviewController extends Controller
                 'order_id'   => $validated['order_id'] ?? null,
                 'rating'     => $validated['rating'],
                 'comment'    => $validated['comment'] ?? null,
-                'status'     => Review::STATUS_APPROVED, // change to STATUS_PENDING for moderation
+                'status'     => Review::STATUS_APPROVED, // use STATUS_PENDING to moderate first
             ]);
 
             return response()->json([
@@ -171,10 +136,7 @@ class ReviewController extends Controller
         }
     }
 
-    /**
-     * PUT /api/reviews/{id}
-     * Owner edits their own review (rating + comment only).
-     */
+    /** Owner edits their review's rating and comment. */
     public function update(Request $request, $id)
     {
         $validated = $request->validate([
@@ -203,10 +165,7 @@ class ReviewController extends Controller
         }
     }
 
-    /**
-     * PUT /api/admin/reviews/{id}/status
-     * Admin approves or rejects a review that was submitted as 'pending'.
-     */
+    /** Admin: approve or reject a review. */
     public function updateStatus(Request $request, $id)
     {
         $validated = $request->validate([
@@ -229,10 +188,7 @@ class ReviewController extends Controller
         }
     }
 
-    /**
-     * DELETE /api/reviews/{id}
-     * Owner or admin can delete a review.
-     */
+    /** Delete a review (owner or admin). */
     public function destroy($id)
     {
         try {

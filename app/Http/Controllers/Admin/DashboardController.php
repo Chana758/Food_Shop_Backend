@@ -12,10 +12,10 @@ use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
-    //  Low stock threshold
+    // Low stock threshold
     private const LOW_STOCK_THRESHOLD = 5;
 
-    //  Recent orders limit
+    // Recent orders limit
     private const RECENT_ORDERS_LIMIT = 5;
 
     // Low stock display limit
@@ -24,61 +24,47 @@ class DashboardController extends Controller
     // Recent delivery orders limit
     private const RECENT_DELIVERY_LIMIT = 5;
 
-    /**
-     * GET /api/admin/dashboard-stats
-     *
-     * Dashboard overview data — fetch on page load and automatically refresh when changes occur.
-     */
+    // Return dashboard statistics and recent activity
     public function stats()
     {
         try {
             $today     = Carbon::today();
             $yesterday = Carbon::yesterday();
 
-            // ════════════════════════════════════════════════════════════════
-            // 1. TODAY'S STATS  (the 4 stat cards at the top of the dashboard)
-            // ════════════════════════════════════════════════════════════════
-
-            // ── Today's Revenue (paid payments only) ─────────────────────
+            // Today's sales
             $todaySales = (float) Payment::where('status', 'paid')
                 ->whereDate('paid_at', $today)
                 ->sum('amount');
 
-            // ── Yesterday's Revenue (for % change) ───────────────────────
+            // Yesterday's sales (for % change)
             $yesterdaySales = (float) Payment::where('status', 'paid')
                 ->whereDate('paid_at', $yesterday)
                 ->sum('amount');
 
-            // ── % Change vs yesterday ─────────────────────────────────────
+            // % change vs yesterday
             $salesChangePct = $yesterdaySales > 0
                 ? round((($todaySales - $yesterdaySales) / $yesterdaySales) * 100, 1)
                 : ($todaySales > 0 ? 100.0 : 0.0);
 
-            // ── Orders Today (all statuses) ───────────────────────────────
+            // Orders today (all statuses)
             $ordersToday = Order::whereDate('created_at', $today)->count();
 
-            // ── New Customers Today ───────────────────────────────────────
-            // NOTE: if the users table does not have a 'role' column,
-            // either swap this for whereDoesntHave('roles', ...) or remove
-            // the where('role', 'customer') filter entirely.
+            // New customers today (NOTE: needs a 'role' column on users)
             $newCustomersToday = User::where('role', 'customer')
                 ->whereDate('created_at', $today)
                 ->count();
 
-            // ── Low Stock Count ───────────────────────────────────────────
+            // Low stock count
             $lowStockCount = Product::where('stock_quantity', '<=', self::LOW_STOCK_THRESHOLD)
                 ->whereNull('deleted_at')
                 ->count();
 
-            
+            // Pending payments (non-cash)
             $pendingPaymentsCount = Payment::where('status', 'pending')
                 ->where('method', '!=', 'cash')
                 ->count();
 
-            // ════════════════════════════════════════════════════════════════
-            // 2. SALES TREND — Last 7 Days  (Bar Chart)
-            // ════════════════════════════════════════════════════════════════
-
+            // Sales trend (last 7 days)
             $rawTrend = Payment::where('status', 'paid')
                 ->whereBetween('paid_at', [
                     Carbon::now()->subDays(6)->startOfDay(),
@@ -93,7 +79,7 @@ class DashboardController extends Controller
                 ->get()
                 ->keyBy(fn($row) => Carbon::parse($row->day_date)->format('D')); // Mon, Tue...
 
-            // ── Fill ALL 7 days (0 if there were no sales that day) ───────
+            // Fill all 7 days (0 if no sales)
             $fullTrend = [];
             for ($i = 6; $i >= 0; $i--) {
                 $dayLabel    = Carbon::now()->subDays($i)->format('D'); // Mon
@@ -107,11 +93,7 @@ class DashboardController extends Controller
                 ];
             }
 
-            // ════════════════════════════════════════════════════════════════
-            // 3. LIVE ORDER QUEUE  (QueueChip cards — kitchen flow for
-            //    dine-in / takeaway orders)
-            // ════════════════════════════════════════════════════════════════
-
+            // Live order queue (kitchen)
             $queueCounts = Order::whereIn('status', ['pending', 'cooking', 'served'])
                 ->select('status', DB::raw('COUNT(*) as cnt'))
                 ->groupBy('status')
@@ -124,21 +106,14 @@ class DashboardController extends Controller
                 'served'  => (int) ($queueCounts['served']  ?? 0),
             ];
 
-            // ════════════════════════════════════════════════════════════════
-            // 4. RECENT ORDERS  (table on the right side of the dashboard,
-            //    all order types combined)
-            // ════════════════════════════════════════════════════════════════
-
+            // Recent orders (all types)
             $recentOrders = Order::with('user:id,name')
                 ->latest()
                 ->limit(self::RECENT_ORDERS_LIMIT)
                 ->get()
                 ->map(fn($order) => [
                     'id'         => $order->id,
-                    // prefer customer_name (set on delivery orders) before
-                    // falling back to the logged-in user's name — a guest
-                    // checkout or delivery order with a different contact
-                    // name would otherwise silently show the account name.
+                    // customer_name first, contact may differ from account name
                     'customer'   => $order->customer_name ?? $order->user?->name ?? 'Guest',
                     'status'     => $order->status,
                     'order_type' => $order->order_type,
@@ -146,10 +121,7 @@ class DashboardController extends Controller
                     'placed'     => $order->created_at?->format('H:i'),
                 ]);
 
-            // ════════════════════════════════════════════════════════════════
-            // 5. LOW STOCK ITEMS  (list on the right side of the dashboard)
-            // ════════════════════════════════════════════════════════════════
-
+            // Low stock items
             $lowStock = Product::where('stock_quantity', '<=', self::LOW_STOCK_THRESHOLD)
                 ->whereNull('deleted_at')
                 ->orderBy('stock_quantity', 'asc')
@@ -164,10 +136,7 @@ class DashboardController extends Controller
                     'critical' => $p->stock_quantity <= 2, // true = render in red
                 ]);
 
-            // ════════════════════════════════════════════════════════════════
-            // 6. DELIVERY QUEUE
-            // ════════════════════════════════════════════════════════════════
-
+            // Delivery queue
             $deliveryCounts = Order::where('order_type', 'delivery')
                 ->whereNotNull('delivery_status')
                 ->select('delivery_status', DB::raw('COUNT(*) as cnt'))
@@ -184,11 +153,10 @@ class DashboardController extends Controller
                 'failed'     => (int) ($deliveryCounts['failed']     ?? 0),
             ];
 
-            // Orders that need staff attention right now: no rider
-            // assigned yet. This number drives the dashboard banner, the
-            // same way $pendingPaymentsCount drives the payment banner.
+            // No rider assigned yet (drives the dashboard banner)
             $unassignedDeliveryCount = $deliveryQueue['unassigned'];
 
+            // Active deliveries
             $recentDeliveryOrders = Order::with(['rider:id,name,phone'])
                 ->where('order_type', 'delivery')
                 ->whereIn('delivery_status', ['unassigned', 'assigned', 'picked_up', 'on_the_way'])
@@ -205,10 +173,7 @@ class DashboardController extends Controller
                     'placed'          => $order->created_at?->format('H:i'),
                 ]);
 
-            // ════════════════════════════════════════════════════════════════
-            // RESPONSE
-            // ════════════════════════════════════════════════════════════════
-
+            // Response
             return response()->json([
                 'status' => 'success',
 
@@ -257,12 +222,7 @@ class DashboardController extends Controller
         }
     }
 
-    /**
-     * GET /api/admin/dashboard-stats/ping
-     * ────────────────────────────────────
-     * Health check — verifies the API is up.
-     * Call: curl -H "Authorization: Bearer TOKEN" /api/admin/dashboard-stats/ping
-     */
+    // GET /api/admin/dashboard-stats/ping (health check)
     public function ping()
     {
         return response()->json([

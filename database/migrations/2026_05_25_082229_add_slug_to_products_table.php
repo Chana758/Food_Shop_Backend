@@ -12,7 +12,7 @@ return new class extends Migration
     public function up()
 {
         Schema::table('products', function (Blueprint $table) {
-            $table->string('slug')->unique()->after('name'); // បន្ថែម slug និងកំណត់ឱ្យ unique
+            $table->string('slug')->unique()->after('name'); 
         });
 }
 

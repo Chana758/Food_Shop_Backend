@@ -44,7 +44,7 @@ class Reservation extends Model
         'guest_count'  => 'integer',
     ];
 
-    // ── Relationships ────────────────────────────────────────────────
+    // Relationships 
 
     public function user(): BelongsTo
     {
@@ -63,7 +63,7 @@ class Reservation extends Model
         return $this->belongsTo(User::class, 'confirmed_by');
     }
 
-    // ── Scopes ───────────────────────────────────────────────────────
+    // Scopes
 
     public function scopeUpcoming($query)
     {

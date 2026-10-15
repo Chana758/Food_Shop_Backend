@@ -10,12 +10,11 @@ return new class extends Migration
 {
     public function up(): void
     {
-        // PostgreSQL: order_type ត្រូវ​បាន​ implement ជា CHECK constraint (មិនមែន native enum)
-        // ត្រូវ​ drop constraint ចាស់ មុននឹង​ប្តូរ column ទៅ string (ងាយ extend value ថ្មីៗជាងតាមក្រោយ)
+
         DB::statement('ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_order_type_check');
 
         Schema::table('orders', function (Blueprint $table) {
-            $table->string('order_type')->change(); // enum → string (validation ធ្វើនៅ controller)
+            $table->string('order_type')->change(); 
             $table->foreignId('rider_id')->nullable()->constrained('riders')->nullOnDelete();
             $table->string('customer_name')->nullable();
             $table->string('customer_phone')->nullable();
