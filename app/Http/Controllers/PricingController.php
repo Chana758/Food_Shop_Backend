@@ -17,4 +17,4 @@ class PricingController extends Controller
             ],
         ], 200);
     }
-}
+} 

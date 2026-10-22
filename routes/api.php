@@ -19,7 +19,7 @@ use App\Http\Controllers\ReservationController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RiderController;
 use App\Http\Controllers\Api\Admin\ReportController;
-use App\Http\Controllers\API\BackupController;
+use App\Http\Controllers\Api\BackupController;
 use App\Http\Controllers\Api\Admin\SettingController;
 use App\Http\Controllers\PricingController;
 
