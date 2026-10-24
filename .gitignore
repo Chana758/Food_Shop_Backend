@@ -17,3 +17,7 @@ yarn-error.log
 /.fleet
 /.idea
 /.vscode
+.env.seed
+.env.seed.save
+*.sql
+.DS_Store
