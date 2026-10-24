@@ -21,3 +21,10 @@ yarn-error.log
 .env.seed.save
 *.sql
 .DS_Store
+.env.seed
+.env.seed.save
+.env.*
+!.env.example
+*.sql
+.DS_Store
+_ide_helper.php
